@@ -1661,9 +1661,11 @@ object Stream {
      * Consider using the overload that takes a `Signal`.
      */
     def interruptWhen(haltWhenTrue: Stream[F,Boolean])(implicit F: Effect[F], ec: ExecutionContext): Stream[F,O] =
-      haltWhenTrue.noneTerminate.either(self.noneTerminate).
-        takeWhile(_.fold(halt => halt.map(!_).getOrElse(false), o => o.isDefined)).
-        collect { case Right(Some(i)) => i }
+      fromFreeC(Algebra.interrupt[F,O].flatMap { interrupt =>
+        // TODO handle errors in monitor, terminate monitor at end of self
+        val monitor = haltWhenTrue.takeWhile(!_, true).filter(identity).evalMap(_ => interrupt)
+        Stream.eval_(async.fork(monitor.run)).append(self).get
+      })
 
     /** Alias for `interruptWhen(haltWhenTrue.discrete)`. */
     def interruptWhen(haltWhenTrue: async.immutable.Signal[F,Boolean])(implicit F: Effect[F], ec: ExecutionContext): Stream[F,O] =

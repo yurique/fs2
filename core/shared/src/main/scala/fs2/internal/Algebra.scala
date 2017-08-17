@@ -4,6 +4,7 @@ import scala.collection.mutable.LinkedHashMap
 import scala.concurrent.ExecutionContext
 import cats.~>
 import cats.effect.{ Effect, IO, Sync }
+import java.util.concurrent.atomic.AtomicBoolean
 
 import fs2.{ AsyncPull, Catenable, Segment }
 import fs2.async
@@ -26,6 +27,7 @@ private[fs2] object Algebra {
   final case class OpenScope[F[_],O]() extends Algebra[F,O,(Scope[F],Scope[F])]
   final case class CloseScope[F[_],O](toClose: Scope[F], scopeAfterClose: Scope[F]) extends Algebra[F,O,Unit]
   final case class Suspend[F[_],O,R](thunk: () => FreeC[Algebra[F,O,?],R]) extends Algebra[F,O,R]
+  final case class GetInterrupt[F[_],O]() extends Algebra[F,O,F[Unit]]
 
   def output[F[_],O](values: Segment[O,Unit]): FreeC[Algebra[F,O,?],Unit] =
     FreeC.Eval[Algebra[F,O,?],Unit](Output(values))
@@ -70,6 +72,9 @@ private[fs2] object Algebra {
 
   def suspend[F[_],O,R](f: => FreeC[Algebra[F,O,?],R]): FreeC[Algebra[F,O,?],R] =
     FreeC.Eval[Algebra[F,O,?],R](Suspend(() => f))
+
+  def interrupt[F[_],O]: FreeC[Algebra[F,O,?],F[Unit]] =
+    FreeC.Eval[Algebra[F,O,?],F[Unit]](GetInterrupt())
 
   final class Scope[F[_]](implicit F: Sync[F]) {
     private val monitor = this
@@ -201,18 +206,19 @@ private[fs2] object Algebra {
   /** Left-fold the output of a stream. */
   def runFold[F2[_],O,B](stream: FreeC[Algebra[F2,O,?],Unit], init: B)(f: (B, O) => B)(implicit F: Sync[F2]): F2[B] =
     F.flatMap(F.delay(new Scope[F2]())) { scope =>
-      F.flatMap(F.attempt(runFold_(stream, None, init)(f, scope))) {
+      F.flatMap(F.attempt(runFold_(stream, None, init)(f, scope, new AtomicBoolean(false)))) {
         case Left(t) => F.flatMap(scope.close(None))(_ => F.raiseError(t))
         case Right(b) => F.flatMap(scope.close(None))(_ => F.pure(b))
       }
     }
 
   def runFold_[F2[_],O,B](stream: FreeC[Algebra[F2,O,?],Unit], asyncSupport: Option[(Effect[F2],ExecutionContext)], init: B)(
-      g: (B, O) => B, scope: Scope[F2])(implicit F: Sync[F2]): F2[B] = {
+      g: (B, O) => B, scope: Scope[F2], interrupt: AtomicBoolean)(implicit F: Sync[F2]): F2[B] = {
     type AlgebraF[x] = Algebra[F,O,x]
     type F[x] = F2[x] // scala bug, if don't put this here, inner function thinks `F` has kind *
     def go(scope: Scope[F], asyncSupport: Option[(Effect[F],ExecutionContext)], acc: B, v: FreeC.ViewL[AlgebraF, Option[(Segment[O,Unit], FreeC[Algebra[F,O,?],Unit])]]): F[B] = {
-      v.get match {
+      if (interrupt.get) F.raiseError(Interrupted)
+      else v.get match {
         case done: FreeC.Pure[AlgebraF, Option[(Segment[O,Unit], FreeC[Algebra[F,O,?],Unit])]] => done.r match {
           case None => F.pure(acc)
           case Some((hd, tl)) =>
@@ -281,7 +287,7 @@ private[fs2] object Algebra {
                       uncons(s.asInstanceOf[FreeC[Algebra[F,Any,?],Unit]]).flatMap(output1(_)),
                       asyncSupport,
                       None: UO
-                    )((o,a) => a, scope)
+                    )((o,a) => a, scope, interrupt)
                   )) { o => ref.setAsyncPure(o) }
                 }(effect, ec))(_ => AsyncPull.readAttemptRef(ref))
               }
@@ -290,6 +296,12 @@ private[fs2] object Algebra {
             case s: Algebra.Suspend[F2,O,_] =>
               F.suspend {
                 try go(scope, asyncSupport, acc, FreeC.Bind(s.thunk(), f).viewL)
+                catch { case NonFatal(e) => go(scope, asyncSupport, acc, f(Left(e)).viewL) }
+              }
+
+            case gi: Algebra.GetInterrupt[F2,O] =>
+              F.suspend {
+                try go(scope, asyncSupport, acc, f(Right(F.delay(interrupt.set(true)))).viewL)
                 catch { case NonFatal(e) => go(scope, asyncSupport, acc, f(Left(e)).viewL) }
               }
 
@@ -319,6 +331,7 @@ private[fs2] object Algebra {
             case Some(ef) => UnconsAsync(uu.s.translate[Algebra[G,Any,?]](algFtoG), ef, uu.ec).asInstanceOf[Algebra[G,O2,X]]
           }
         case s: Suspend[F,O2,X] => Suspend(() => s.thunk().translate(algFtoG))
+        case gi: GetInterrupt[F,O2] => gi.asInstanceOf[Algebra[G,O2,X]]
       }
     }
     fr.translate[Algebra[G,O,?]](algFtoG)
