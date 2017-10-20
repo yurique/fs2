@@ -30,7 +30,8 @@ lazy val commonSettings = Seq(
       "-Xfatal-warnings",
       "-Yno-adapted-args",
       "-Ywarn-value-discard",
-      "-Ywarn-unused-import"
+      "-Ywarn-unused-import",
+      "-Xsource:2.13"
     ) else Nil) ++ (if (scalaBinaryVersion.value startsWith "2.11") List("-Xexperimental") else Nil), // 2.11 needs -Xexperimental to enable SAM conversion
   scalacOptions in (Compile, console) ~= {_.filterNot("-Ywarn-unused-import" == _).filterNot("-Xlint" == _).filterNot("-Xfatal-warnings" == _)},
   scalacOptions in (Compile, console) += "-Ydelambdafy:inline",
