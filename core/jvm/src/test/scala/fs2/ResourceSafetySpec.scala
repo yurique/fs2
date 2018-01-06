@@ -209,32 +209,35 @@ class ResourceSafetySpec extends Fs2Spec with EventuallySupport {
     }
 
     "asynchronous resource allocation (6)" in {
-      // simpler version of (5) above which previously failed reliably, checks the case where a
-      // stream is interrupted while in the middle of a resource acquire that is immediately followed
-      // by a step that never completes!
-      val s = Stream(Stream(1))
-      val signal = async.signalOf[IO, Boolean](false).unsafeRunSync()
-      val c = new AtomicLong(1)
-      (IO.shift *> IO { Thread.sleep(20L) } *> signal.set(true))
-        .unsafeRunSync() // after 20 ms, interrupt
-      runLog {
-        s.evalMap { inner =>
-          async.start {
-            Stream
-              .bracket(IO { Thread.sleep(2000) })( // which will be in the middle of acquiring the resource
-                                                  _ => inner,
-                                                  _ => IO { c.decrementAndGet; () })
-              .evalMap { _ =>
-                IO.async[Unit](_ => ())
-              }
-              .interruptWhen(signal.discrete)
-              .compile
-              .drain
+      (0 until 100).foreach { n =>
+        println("Iteration " + n)
+        // simpler version of (5) above which previously failed reliably, checks the case where a
+        // stream is interrupted while in the middle of a resource acquire that is immediately followed
+        // by a step that never completes!
+        val s = Stream(Stream(1))
+        val signal = async.signalOf[IO, Boolean](false).unsafeRunSync()
+        val c = new AtomicLong(1)
+        (IO.shift *> IO { Thread.sleep(20L) } *> signal.set(true))
+          .unsafeRunSync() // after 20 ms, interrupt
+        runLog {
+          s.evalMap { inner =>
+            async.start {
+              Stream
+                .bracket(IO { Thread.sleep(2000) })( // which will be in the middle of acquiring the resource
+                                                    _ => inner,
+                                                    _ => IO { c.decrementAndGet; () })
+                .evalMap { _ =>
+                  IO.async[Unit](_ => ())
+                }
+                .interruptWhen(signal.discrete)
+                .compile
+                .drain
+            }
           }
         }
+        // required longer delay here, hence the sleep of 2s and async.start that is not bound.
+        eventually(Timeout(5 second)) { c.get shouldBe 0L }
       }
-      // required longer delay here, hence the sleep of 2s and async.start that is not bound.
-      eventually(Timeout(5 second)) { c.get shouldBe 0L }
     }
 
     "evaluating a bracketed stream multiple times is safe" in {

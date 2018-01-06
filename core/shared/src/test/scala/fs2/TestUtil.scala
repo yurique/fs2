@@ -12,7 +12,7 @@ import fs2.internal.NonFatal
 
 trait TestUtil extends TestUtilPlatform {
 
-  val timeout: FiniteDuration = 60.seconds
+  val timeout: FiniteDuration = 600.seconds
 
   lazy val verbose: Boolean = sys.props.get("fs2.test.verbose").isDefined
 
