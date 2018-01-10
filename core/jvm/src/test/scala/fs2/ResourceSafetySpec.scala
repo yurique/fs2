@@ -7,6 +7,8 @@ import org.scalacheck._
 import org.scalatest.concurrent.PatienceConfiguration.Timeout
 import scala.concurrent.duration._
 
+import TestUtil._
+
 class ResourceSafetySpec extends Fs2Spec with EventuallySupport {
 
   "Resource Safety" - {
@@ -57,7 +59,10 @@ class ResourceSafetySpec extends Fs2Spec with EventuallySupport {
                                                 _ => IO { c.incrementAndGet; throw Err })
       val nested = s0.foldRight(innermost)((i, inner) => bracket(c)(Stream.emit(i) ++ inner))
       try { runLog { nested }; throw Err } // this test should always fail, so the `run` should throw
-      catch { case Err => () }
+      catch {
+        case Err => ()
+        case e: CompositeFailure if e.all.forall { case Err => true; case _ => false } => ()
+      }
       withClue(f.tag) { 0L shouldBe c.get }
     }
 

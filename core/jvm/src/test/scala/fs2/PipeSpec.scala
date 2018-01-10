@@ -7,6 +7,7 @@ import cats.effect.IO
 import cats.implicits._
 import scala.concurrent.duration._
 
+import TestUtil._
 import fs2.Stream._
 
 class PipeSpec extends Fs2Spec {
@@ -382,7 +383,7 @@ class PipeSpec extends Fs2Spec {
       val s = Stream(1)
       val f = (a: Int, b: Int) => a + b
       val result = s.toVector.scan(0)(f)
-      runLog((s ++ never).scan(0)(f).take(result.size), timeout = 1 second) shouldBe result
+      runLog((s ++ never).scan(0)(f).take(result.size))(1 second) shouldBe result
     }
 
     "scan" in forAll { (s: PureStream[Int], n: Int) =>
@@ -520,8 +521,7 @@ class PipeSpec extends Fs2Spec {
               Stream.raiseError(Err)
             }
             .attempt
-        } should contain theSameElementsAs Left(Err) +: s.get.toVector
-          .map(Right(_))
+        } shouldBe Vector(Left(Err))
         runLog {
           s.get
             .covary[IO]
@@ -529,25 +529,42 @@ class PipeSpec extends Fs2Spec {
               Stream.raiseError(Err)
             }
             .attempt
-        } should contain theSameElementsAs Left(Err) +: s.get.toVector
-          .map(Right(_))
+        } shouldBe Vector(Left(Err))
       }
     }
+
+    "propagate error from source" in {
+      forAll { (f: Failure) =>
+        runLog {
+          f.get
+            .covary[IO]
+            .observe(_.drain)
+            .attempt
+        } shouldBe Vector(Left(Err))
+        runLog {
+          f.get
+            .covary[IO]
+            .observeAsync(2)(_.drain)
+            .attempt
+        } shouldBe Vector(Left(Err))
+      }
+    }
+
     "handle finite observing sink" in {
       forAll { (s: PureStream[Int]) =>
         runLog {
           s.get.covary[IO].observe { _ =>
             Stream.empty
           }
-        } should contain theSameElementsAs s.get.toVector
+        } shouldBe Vector.empty
         runLog {
           s.get.covary[IO].observe { _.take(2).drain }
-        } should contain theSameElementsAs s.get.toVector
+        }
         runLog {
           s.get.covary[IO].observeAsync(2) { _ =>
             Stream.empty
           }
-        } should contain theSameElementsAs s.get.toVector
+        } shouldBe Vector.empty
       }
     }
     "handle multiple consecutive observations" in {

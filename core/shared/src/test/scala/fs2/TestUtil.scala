@@ -4,17 +4,12 @@ import java.util.concurrent.TimeoutException
 import org.scalacheck.{Arbitrary, Cogen, Gen, Shrink}
 
 import scala.concurrent.Future
-import scala.concurrent.duration._
 
 import cats.effect.IO
 import cats.implicits._
 import fs2.internal.NonFatal
 
-trait TestUtil extends TestUtilPlatform {
-
-  val timeout: FiniteDuration = 600.seconds
-
-  lazy val verbose: Boolean = sys.props.get("fs2.test.verbose").isDefined
+object TestUtil extends TestUtilPlatform {
 
   def runLogF[A](s: Stream[IO,A]): Future[Vector[A]] = (IO.shift *> s.compile.toVector).unsafeToFuture
 
@@ -108,12 +103,7 @@ trait TestUtil extends TestUtilPlatform {
       Failure("failure-mid-effect", Stream.eval(IO.pure(()).flatMap(_ => throw Err))),
       Failure("failure-in-pure-code", Stream.emit(42).map(_ => throw Err)),
       Failure("failure-in-pure-code(2)", Stream.emit(42).flatMap(_ => throw Err)),
-      Failure("failure-in-pure-pull", Stream.emit(42).pull.uncons.map(_ => throw Err).stream),
-      Failure("failure-in-async-code",
-        Stream.eval[IO,Int](IO(throw Err)).pull.unconsAsync.flatMap { _.pull.flatMap {
-          case None => Pull.pure(())
-          case Some((hd,tl)) => Pull.output(hd) >> Pull.pure(())
-        }}.stream)
+      Failure("failure-in-pure-pull", Stream.emit(42).pull.uncons.map(_ => throw Err).stream)
     )
   )
 
@@ -129,5 +119,3 @@ trait TestUtil extends TestUtilPlatform {
 
   val nonEmptyNestedVectorGen: Gen[Vector[Vector[Int]]] = nestedVectorGen[Int](1,10)
 }
-
-object TestUtil extends TestUtil
