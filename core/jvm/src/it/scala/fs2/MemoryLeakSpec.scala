@@ -24,7 +24,7 @@ class MemoryLeakSpec extends FunSuite {
       samplePeriod: FiniteDuration = 1.seconds,
       monitorPeriod: FiniteDuration = 10.seconds,
       limitTotalBytesIncreasePerSecond: Long = 700000,
-      limitConsecutiveIncreases: Int = 10
+      limitConsecutiveIncreases: Int = 5
   )
 
   private def heapUsed: IO[Long] =
@@ -179,6 +179,11 @@ class MemoryLeakSpec extends FunSuite {
 
   leakTest("awakeEvery") {
     Stream.awakeEvery[IO](1.millis).flatMap(_ => Stream.eval(IO.unit))
+  }
+
+  leakTest("awakeEvery 2".only) {
+    //Stream(()).repeat.map(identity _).foreach(_ => IO.unit)
+    Stream.awakeEvery[IO](1.millis).map(identity _).foreach(_ => IO.unit)
   }
 
   leakTest("signal discrete") {
