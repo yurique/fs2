@@ -270,27 +270,32 @@ private[compression] trait CompressionCompanionPlatform {
           trailerSize: Int
       ): Stream[F, Byte] => Stream[F, Byte] = stream =>
         Stream
-          .eval(F.delay(new Inflater(inflateParams.header.juzDeflaterNoWrap)))
+          .bracket(F.delay(new Inflater(inflateParams.header.juzDeflaterNoWrap))) { inflater =>
+            F.delay(inflater.end())
+          }
           .flatMap { inflater =>
             val inflatedBuffer = new Array[Byte](inflateParams.bufferSizeOrMinimum)
             val crcBuilder = new CrcBuilder
 
-            def setTrailerChunk(
-                remaining: Chunk[Byte],
-                s: Stream[F, Byte]
-            ): Pull[F, INothing, Unit] =
+            def setRefs(trailerBytes: Chunk[Byte]) =
               Pull.eval {
-                s
-                  .take((trailerSize - remaining.size).toLong)
-                  .chunkAll
-                  .compile
-                  .last
-                  .flatMap {
-                    case None          => F.unit
-                    case Some(trailer) => trailerChunk.set(remaining ++ trailer)
-                  } >>
+                trailerChunk.set(trailerBytes) >>
                   bytesWritten.set(inflater.getBytesWritten) >>
                   crc32.set(crcBuilder.getValue)
+              }
+
+            def setTrailerChunk(
+                remaining: Chunk[Byte]
+            ): Stream[F, Byte] => Pull[F, INothing, Unit] =
+              _.pull.uncons.flatMap {
+                case None =>
+                  setRefs(remaining)
+                case Some((chunk, rest)) =>
+                  if (remaining.size + chunk.size > trailerSize) {
+                    setRefs(remaining ++ chunk.take(trailerSize - remaining.size))
+                  } else {
+                    setTrailerChunk(remaining ++ chunk)(rest)
+                  }
               }
 
             def inflateChunk(
@@ -335,21 +340,11 @@ private[compression] trait CompressionCompanionPlatform {
                 case Some((chunk, rest)) =>
                   inflateChunk(chunk.toArraySlice, 0).flatMap {
                     case None            => pull(rest)
-                    case Some(remaining) => setTrailerChunk(remaining, rest)
+                    case Some(remaining) => setTrailerChunk(remaining)(rest)
                   }
               }
 
-            pull(stream)
-              .flatMap { _ =>
-                Pull.eval(F.delay(inflater.end()))
-              }
-              .handleErrorWith { case NonFatal(e) =>
-                Pull.eval(F.delay(inflater.end())) >> Pull.raiseError(e)
-              }
-              .stream
-//              .onFinalize {
-//                F.delay(inflater.end())
-//              }
+            pull(stream).stream
           }
 
       def gzip(
