@@ -31,9 +31,9 @@ private[compression] object UnconsUntil {
     * `Pull.pure(None)` is returned if the end of the source stream is reached.
     */
   def apply[F[_]](
-      predicate: Byte => Boolean,
+      splitAt: Byte,
       softLimit: Int,
-      crc32: CrcBuilder
+      crc32: CRC32
   ): Stream[F, Byte] => Pull[F, INothing, Option[
     (Chunk[Byte], Stream[F, Byte])
   ]] = {
@@ -46,11 +46,12 @@ private[compression] object UnconsUntil {
         case None =>
           Pull.pure(None)
         case Some((hd, tl)) =>
-          hd.indexWhere(predicate) match {
-            case Some(i) =>
+          val slice = hd.toArraySlice
+          slice.values.indexOf(splitAt, slice.offset) match {
+            case i if i >= slice.offset && i < slice.offset + slice.length =>
               val (pfx, sfx) = hd.splitAt(i + 1)
 
-              crc32.update(pfx)
+              crc32.updateChunk(pfx)
               Pull.pure(
                 Some(
                   (
@@ -59,8 +60,8 @@ private[compression] object UnconsUntil {
                   )
                 )
               )
-            case None =>
-              crc32.update(hd)
+            case _ =>
+              crc32.updateChunk(hd)
               checksumOnly(acc, tl)
           }
       }
@@ -74,10 +75,11 @@ private[compression] object UnconsUntil {
         case None =>
           Pull.pure(None)
         case Some((hd, tl)) =>
-          hd.indexWhere(predicate) match {
-            case Some(i) =>
+          val slice = hd.toArraySlice
+          slice.values.indexOf(splitAt, slice.offset) match {
+            case i if i >= slice.offset && i < slice.offset + slice.length =>
               val (pfx, sfx) = hd.splitAt(i + 1)
-              crc32.update(pfx)
+              crc32.updateChunk(pfx)
               Pull.pure(
                 Some(
                   (
@@ -86,8 +88,8 @@ private[compression] object UnconsUntil {
                   )
                 )
               )
-            case None =>
-              crc32.update(hd)
+            case _ =>
+              crc32.updateChunk(hd)
               val newSize = size + hd.size
               if (newSize < softLimit)
                 go(hd :: acc, tl, newSize)

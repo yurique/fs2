@@ -25,7 +25,7 @@ package compression
 import cats.effect.Ref
 import cats.effect.kernel.Sync
 import cats.syntax.all._
-import fs2.compression.internal.CrcBuilder
+import fs2.compression.internal.CRC32
 
 import java.time.Instant
 import java.util.concurrent.TimeUnit
@@ -150,7 +150,7 @@ private[compression] trait CompressionCompanionPlatform {
       private def _deflate(
           deflateParams: DeflateParams,
           deflater: Deflater,
-          crc32: Option[CrcBuilder]
+          crc32: Option[CRC32]
       ): Pipe[F, Byte, Byte] =
         in =>
           Stream.suspend {
@@ -161,7 +161,7 @@ private[compression] trait CompressionCompanionPlatform {
       private def _deflate_chunk(
           deflateParams: DeflateParams,
           deflater: Deflater,
-          crc32: Option[CrcBuilder],
+          crc32: Option[CRC32],
           chunk: Chunk[Byte],
           deflatedBuffer: Array[Byte],
           isFinalChunk: Boolean
@@ -203,7 +203,7 @@ private[compression] trait CompressionCompanionPlatform {
       private def _deflate_stream(
           deflateParams: DeflateParams,
           deflater: Deflater,
-          crc32: Option[CrcBuilder],
+          crc32: Option[CRC32],
           deflatedBuffer: Array[Byte]
       ): Stream[F, Byte] => Pull[F, Byte, Unit] =
         _.pull.uncons.flatMap {
@@ -282,13 +282,13 @@ private[compression] trait CompressionCompanionPlatform {
             inflater => {
               val track = trailerChunk.isDefined && bytesWritten.isDefined && crc32.isDefined
               val inflatedBuffer = new Array[Byte](inflateParams.bufferSizeOrMinimum)
-              val crcBuilder = new CrcBuilder
+              val CRC32 = new CRC32
 
               def setRefs(trailerBytes: Chunk[Byte]) =
                 Pull.eval {
                   trailerChunk.fold(F.unit)(_.set(trailerBytes)) >>
                     bytesWritten.fold(F.unit)(_.set(inflater.getBytesWritten)) >>
-                    crc32.fold(F.unit)(_.set(crcBuilder.getValue))
+                    crc32.fold(F.unit)(_.set(CRC32.getValue))
                 }
 
               def setTrailerChunk(
@@ -315,7 +315,7 @@ private[compression] trait CompressionCompanionPlatform {
                   bytesChunk.length - offset
                 )
                 val inflatedBytes = inflater.inflate(inflatedBuffer)
-                if (track) crcBuilder.update(inflatedBuffer, 0, inflatedBytes)
+                if (track) CRC32.update(inflatedBuffer, 0, inflatedBytes)
                 Pull.output(copyAsChunkBytes(inflatedBuffer, inflatedBytes)) >> {
                   val remainingBytes = inflater.getRemaining
                   if (!inflater.finished()) {

@@ -24,7 +24,7 @@ package compression
 
 import cats.effect.{Ref, Sync}
 import cats.syntax.all._
-import fs2.compression.internal.{CountPipe, CrcBuilder, CrcPipe, UnconsUntil}
+import fs2.compression.internal._
 
 import java.io.EOFException
 import java.nio.charset.StandardCharsets
@@ -45,7 +45,7 @@ class Gzip[F[_]](implicit F: Sync[F]) {
       deflateParams match {
         case params: DeflateParams if params.header == ZLibParams.Header.GZIP =>
           Stream.eval(Ref.of[F, Long](0)).flatMap { bytesIn =>
-            val crc = new CrcBuilder
+            val crc = new CRC32
             _gzip_header(
               fileName,
               modificationTime,
@@ -99,7 +99,7 @@ class Gzip[F[_]](implicit F: Sync[F]) {
       gzipOperatingSystem.THIS(osName)
     ) // OS: Operating System
 
-    val crc32 = new CrcBuilder()
+    val crc32 = new CRC32()
     crc32.update(header)
 
     val fileNameEncoded = fileName.map { string =>
@@ -114,7 +114,7 @@ class Gzip[F[_]](implicit F: Sync[F]) {
       crc32.update(zeroByte.toInt)
       bytes
     }
-    val crc32Value = crc32.getValue
+    val crc32Value = crc32.getValue()
 
     val crc16 =
       if (fhCrcEnabled)
@@ -135,10 +135,10 @@ class Gzip[F[_]](implicit F: Sync[F]) {
       Stream.chunk(moveAsChunkBytes(crc16))
   }
 
-  private def _gzip_trailer(bytesIn: Ref[F, Long], crcBuilder: CrcBuilder): Stream[F, Byte] =
+  private def _gzip_trailer(bytesIn: Ref[F, Long], CRC32: CRC32): Stream[F, Byte] =
     Stream.eval(bytesIn.get).flatMap { bytesIn =>
       // See RFC 1952: https://www.ietf.org/rfc/rfc1952.txt
-      val crc = crcBuilder.getValue & 0xffffffff
+      val crc = CRC32.getValue() & 0xffffffff
       val crc32Value = crc
       val trailer = Array[Byte](
         (crc32Value & 0xff).toByte, // CRC-32: Cyclic Redundancy Check
@@ -272,7 +272,7 @@ class Gzip[F[_]](implicit F: Sync[F]) {
               _
             )
           ) =>
-        val headerCrc32 = new CrcBuilder
+        val headerCrc32 = new CRC32
         headerCrc32.update(header)
         val secondsSince197001010000 =
           unsignedToLong(header(4), header(5), header(6), header(7))
@@ -323,7 +323,7 @@ class Gzip[F[_]](implicit F: Sync[F]) {
   private def _gunzip_readOptionalHeader(
       streamAfterMandatoryHeader: Stream[F, Byte],
       flags: Byte,
-      headerCrc32: CrcBuilder,
+      headerCrc32: CRC32,
       secondsSince197001010000: Long,
       inflate: Stream[F, Byte] => Stream[
         F,
@@ -384,7 +384,7 @@ class Gzip[F[_]](implicit F: Sync[F]) {
 
   private def _gunzip_skipOptionalExtraField(
       isPresent: Boolean,
-      crc32Builder: CrcBuilder
+      crc32Builder: CRC32
   ): Stream[F, Byte] => Stream[F, Stream[F, Byte]] =
     stream =>
       if (isPresent) {
@@ -406,7 +406,7 @@ class Gzip[F[_]](implicit F: Sync[F]) {
                     .flatMap {
                       case Some((optionalExtraFieldChunk, streamAfterOptionalExtraField)) =>
                         crc32Builder.update(lengthBytes)
-                        crc32Builder.update(
+                        crc32Builder.updateChunk(
                           optionalExtraFieldChunk
                         )
                         Pull.output1(streamAfterOptionalExtraField)
@@ -429,13 +429,13 @@ class Gzip[F[_]](implicit F: Sync[F]) {
 
   private def _gunzip_readOptionalStringField(
       isPresent: Boolean,
-      headerCrc32: CrcBuilder,
+      headerCrc32: CRC32,
       fieldName: String,
       fieldBytesSoftLimit: Int
   ): Stream[F, Byte] => Stream[F, (Option[String], Stream[F, Byte])] =
     stream =>
       if (isPresent)
-        UnconsUntil[F](_ == zeroByte, fieldBytesSoftLimit, headerCrc32)
+        UnconsUntil[F](zeroByte, fieldBytesSoftLimit, headerCrc32)
           .apply(stream)
           .flatMap {
             case Some((chunk, rest)) =>
@@ -470,7 +470,7 @@ class Gzip[F[_]](implicit F: Sync[F]) {
 
   private def _gunzip_validateHeader(
       isPresent: Boolean,
-      headerCrc32: CrcBuilder
+      headerCrc32: CRC32
   ): Pipe[F, Byte, Byte] =
     stream =>
       if (isPresent)
@@ -479,7 +479,7 @@ class Gzip[F[_]](implicit F: Sync[F]) {
           .flatMap {
             case Some((headerCrcChunk, streamAfterHeaderCrc)) =>
               val expectedHeaderCrc16 = unsignedToInt(headerCrcChunk(0), headerCrcChunk(1))
-              val actualHeaderCrc16 = headerCrc32.getValue.toInt & 0xffff
+              val actualHeaderCrc16 = headerCrc32.getValue().toInt & 0xffff
               if (expectedHeaderCrc16 != actualHeaderCrc16)
                 Pull.raiseError(new ZipException("Header failed CRC validation"))
               else
