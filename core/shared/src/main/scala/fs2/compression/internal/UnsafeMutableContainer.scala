@@ -19,27 +19,15 @@
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-package fs2
-package compression
-package internal
+package fs2.compression.internal
 
-private[fs2] object CountPipe {
+private[fs2] class UnsafeMutableContainer[V] {
 
-  def apply[F[_]](deferredCount: UnsafeMutableContainer[Long]): Pipe[F, Byte, Byte] = {
-    def pull(count: Long): Stream[F, Byte] => Pull[F, Byte, Long] =
-      _.pull.uncons.flatMap {
-        case None => Pull.pure(count)
-        case Some((c: Chunk[Byte], rest: Stream[F, Byte])) =>
-          Pull.output(c) >> pull(count + c.size)(rest)
-      }
+  @volatile private[this] var _value: V = _
 
-    def calculateSizeOf(input: Stream[F, Byte]): Pull[F, Byte, Unit] =
-      for {
-        count <- pull(0)(input)
-        _ <- Pull.pure(deferredCount.set(count))
-      } yield ()
+  def get: V = _value
 
-    calculateSizeOf(_).stream
-  }
+  def set(v: V): Unit =
+    _value = v
 
 }

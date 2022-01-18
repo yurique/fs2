@@ -22,10 +22,9 @@
 package fs2
 package compression
 
-import cats.effect.Ref
-import cats.effect.kernel.Sync
+import cats.effect.Sync
 import cats.syntax.all._
-import fs2.compression.internal.CRC32
+import fs2.compression.internal.{CRC32, UnsafeMutableContainer}
 
 import java.time.Instant
 import java.util.concurrent.TimeUnit
@@ -240,17 +239,21 @@ private[compression] trait CompressionCompanionPlatform {
           trailerSize: Int
       ): Stream[F, Byte] => Stream[
         F,
-        (Stream[F, Byte], Ref[F, Chunk[Byte]], Ref[F, Long], Ref[F, Long])
+        (
+            Stream[F, Byte],
+            UnsafeMutableContainer[Chunk[Byte]],
+            UnsafeMutableContainer[Long],
+            UnsafeMutableContainer[Long]
+        )
       ] = in =>
         Stream.suspend {
-          Stream
-            .eval(
-              (
-                Ref.of[F, Chunk[Byte]](Chunk.empty),
-                Ref.of[F, Long](0),
-                Ref.of[F, Long](0)
-              ).tupled
+          Stream(
+            (
+              new UnsafeMutableContainer[Chunk[Byte]],
+              new UnsafeMutableContainer[Long],
+              new UnsafeMutableContainer[Long]
             )
+          )
             .map { case (trailerChunk, bytesWritten, crc32) =>
               (
                 _inflate_chunks(
@@ -271,9 +274,9 @@ private[compression] trait CompressionCompanionPlatform {
 
       private def _inflate_chunks(
           inflateParams: InflateParams,
-          trailerChunk: Option[Ref[F, Chunk[Byte]]],
-          bytesWritten: Option[Ref[F, Long]],
-          crc32: Option[Ref[F, Long]],
+          trailerChunk: Option[UnsafeMutableContainer[Chunk[Byte]]],
+          bytesWritten: Option[UnsafeMutableContainer[Long]],
+          crc32: Option[UnsafeMutableContainer[Long]],
           trailerSize: Int
       ): Stream[F, Byte] => Stream[F, Byte] = stream =>
         Pull
@@ -282,13 +285,13 @@ private[compression] trait CompressionCompanionPlatform {
             inflater => {
               val track = trailerChunk.isDefined && bytesWritten.isDefined && crc32.isDefined
               val inflatedBuffer = new Array[Byte](inflateParams.bufferSizeOrMinimum)
-              val CRC32 = new CRC32
+              val crcBuilder = if (track) new CRC32 else null
 
               def setRefs(trailerBytes: Chunk[Byte]) =
-                Pull.eval {
-                  trailerChunk.fold(F.unit)(_.set(trailerBytes)) >>
-                    bytesWritten.fold(F.unit)(_.set(inflater.getBytesWritten)) >>
-                    crc32.fold(F.unit)(_.set(CRC32.getValue))
+                Pull.pure {
+                  trailerChunk.foreach(_.set(trailerBytes))
+                  bytesWritten.foreach(_.set(inflater.getBytesWritten))
+                  crc32.foreach(_.set(crcBuilder.getValue))
                 }
 
               def setTrailerChunk(
@@ -315,7 +318,7 @@ private[compression] trait CompressionCompanionPlatform {
                   bytesChunk.length - offset
                 )
                 val inflatedBytes = inflater.inflate(inflatedBuffer)
-                if (track) CRC32.update(inflatedBuffer, 0, inflatedBytes)
+                if (track) crcBuilder.update(inflatedBuffer, 0, inflatedBytes)
                 Pull.output(copyAsChunkBytes(inflatedBuffer, inflatedBytes)) >> {
                   val remainingBytes = inflater.getRemaining
                   if (!inflater.finished()) {
@@ -341,8 +344,8 @@ private[compression] trait CompressionCompanionPlatform {
                 }
               }
 
-              def pull: Stream[F, Byte] => Pull[F, Byte, Unit] = in =>
-                in.pull.uncons.flatMap {
+              def pull: Stream[F, Byte] => Pull[F, Byte, Unit] =
+                _.pull.uncons.flatMap {
                   case None => Pull.done
                   case Some((chunk, rest)) =>
                     inflateChunk(chunk.toArraySlice, 0).flatMap {

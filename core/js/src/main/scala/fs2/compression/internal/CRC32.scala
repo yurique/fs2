@@ -51,7 +51,7 @@ package internal
   *
   * @see java.util.zip.CRC32
   */
-private[compression] final class CRC32 {
+private[fs2] final class CRC32 {
 
   import CRC32._
 

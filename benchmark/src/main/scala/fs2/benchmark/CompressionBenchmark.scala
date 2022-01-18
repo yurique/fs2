@@ -38,25 +38,25 @@ class CompressionBenchmark {
   @Param(Array("true", "false"))
   var withRandomBytes: Boolean = _
 
-  @Benchmark
-  def deflate(): Byte =
-    benchmark(
-      randomBytes,
-      zeroBytes,
-      Compression[IO].deflate(DeflateParams(bufferSize = bufferSize))
-    )
-
-  @Benchmark
-  def inflate(): Byte =
-    benchmark(
-      randomBytesDeflated,
-      zeroBytesDeflated,
-      Compression[IO].inflate(InflateParams(bufferSize = bufferSize))
-    )
-
-  @Benchmark
-  def gzip(): Byte =
-    benchmark(randomBytes, zeroBytes, Compression[IO].gzip(bufferSize = bufferSize))
+//  @Benchmark
+//  def deflate(): Byte =
+//    benchmark(
+//      randomBytes,
+//      zeroBytes,
+//      Compression[IO].deflate(DeflateParams(bufferSize = bufferSize))
+//    )
+//
+//  @Benchmark
+//  def inflate(): Byte =
+//    benchmark(
+//      randomBytesDeflated,
+//      zeroBytesDeflated,
+//      Compression[IO].inflate(InflateParams(bufferSize = bufferSize))
+//    )
+//
+//  @Benchmark
+//  def gzip(): Byte =
+//    benchmark(randomBytes, zeroBytes, Compression[IO].gzip(bufferSize = bufferSize))
 
   @Benchmark
   def gunzip(): Byte =

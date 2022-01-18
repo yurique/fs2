@@ -19,28 +19,17 @@
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-package fs2.compression.internal
+package fs2.compression
 
 import fs2.Chunk
 
-private[fs2] class CrcBuilder {
+package object internal {
 
-  private val crc = new CRC32
-
-  def update(b: Int): Unit =
-    crc.update(b)
-
-  def update(b: Array[Byte], off: Int, len: Int): Unit =
-    crc.update(b, off, len)
-
-  def update(c: Chunk[Byte]): Unit = {
-    val arr = c.toArraySlice
-    update(arr.values, arr.offset, arr.length)
+  implicit class CRC32Ops(val crc32: CRC32) extends AnyVal {
+    def updateChunk(c: Chunk[Byte]): Unit = {
+      val arr = c.toArraySlice
+      crc32.update(arr.values, arr.offset, arr.length)
+    }
   }
-
-  def update(b: Array[Byte]): Unit =
-    crc.update(b)
-
-  def getValue: Long = crc.getValue()
 
 }

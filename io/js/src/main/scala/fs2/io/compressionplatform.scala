@@ -27,9 +27,7 @@ import cats.syntax.all._
 import fs2.compression._
 import fs2.internal.jsdeps.node.zlibMod
 import fs2.io.internal.SuspendedStream
-import fs2.compression.internal.CrcBuilder
-import fs2.compression.internal.CountPipe
-import fs2.compression.internal.CrcPipe
+import fs2.compression.internal._
 import scala.concurrent.duration.FiniteDuration
 
 private[fs2] trait compressionplatform {
@@ -71,7 +69,12 @@ private[fs2] trait compressionplatform {
           trailerSize: Int
       ): Stream[F, Byte] => Stream[
         F,
-        (Stream[F, Byte], Ref[F, Chunk[Byte]], Ref[F, Long], Ref[F, Long])
+        (
+            Stream[F, Byte],
+            UnsafeMutableContainer[Chunk[Byte]],
+            UnsafeMutableContainer[Long],
+            UnsafeMutableContainer[Long]
+        )
       ] = in => {
         val options = zlibMod
           .ZlibOptions()
@@ -87,9 +90,9 @@ private[fs2] trait compressionplatform {
           Stream.resource(SuspendedStream(in)),
           Stream.eval(Ref.of[F, Chunk[Byte]](Chunk.empty)),
           Stream.eval(Ref.of[F, Long](0)),
-          Stream.eval(Ref.of[F, Long](0)),
-          Stream.eval(Ref.of[F, Long](0)),
-          Stream.eval(Ref.of[F, Chunk[Byte]](Chunk.empty))
+          Stream(new UnsafeMutableContainer[Long]),
+          Stream(new UnsafeMutableContainer[Long]),
+          Stream(new UnsafeMutableContainer[Chunk[Byte]])
         ).tupled.map {
           case (
                 (inflate, out),
@@ -120,10 +123,10 @@ private[fs2] trait compressionplatform {
                 } else {
                   headTrailerBytes.take(trailerSize).pure[F]
                 }
-                (wholeTrailer >>= trailerChunk.set).void
+                wholeTrailer.flatMap(trailer => F.delay(trailerChunk.set(trailer)))
               }
 
-            val crcBuilder = new CrcBuilder
+            val crcBuilder = new CRC32
             val inflated = out
               .concurrently(
                 trackedStream
@@ -140,7 +143,7 @@ private[fs2] trait compressionplatform {
               .through(CountPipe(bytesWritten))
               .through(CrcPipe(crcBuilder)) ++
               Stream
-                .eval(crc32.set(crcBuilder.getValue))
+                .eval(F.delay(crc32.set(crcBuilder.getValue())))
                 .flatMap(_ => Stream.empty)
 
             (inflated, trailerChunk, bytesWritten, crc32)

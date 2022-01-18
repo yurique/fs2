@@ -22,8 +22,8 @@
 package fs2
 package compression
 
-import cats.effect.{Ref, Sync}
 import cats.syntax.all._
+import cats.effect.Sync
 import fs2.compression.internal._
 
 import java.io.EOFException
@@ -44,7 +44,7 @@ class Gzip[F[_]](implicit F: Sync[F]) {
     stream =>
       deflateParams match {
         case params: DeflateParams if params.header == ZLibParams.Header.GZIP =>
-          Stream.eval(Ref.of[F, Long](0)).flatMap { bytesIn =>
+          Stream(new UnsafeMutableContainer[Long]).flatMap { bytesIn =>
             val crc = new CRC32
             _gzip_header(
               fileName,
@@ -135,28 +135,36 @@ class Gzip[F[_]](implicit F: Sync[F]) {
       Stream.chunk(moveAsChunkBytes(crc16))
   }
 
-  private def _gzip_trailer(bytesIn: Ref[F, Long], CRC32: CRC32): Stream[F, Byte] =
-    Stream.eval(bytesIn.get).flatMap { bytesIn =>
-      // See RFC 1952: https://www.ietf.org/rfc/rfc1952.txt
-      val crc = CRC32.getValue() & 0xffffffff
-      val crc32Value = crc
-      val trailer = Array[Byte](
-        (crc32Value & 0xff).toByte, // CRC-32: Cyclic Redundancy Check
-        ((crc32Value >> 8) & 0xff).toByte,
-        ((crc32Value >> 16) & 0xff).toByte,
-        ((crc32Value >> 24) & 0xff).toByte,
-        (bytesIn & 0xff).toByte, // ISIZE: Input size
-        ((bytesIn >> 8) & 0xff).toByte,
-        ((bytesIn >> 16) & 0xff).toByte,
-        ((bytesIn >> 24) & 0xff).toByte
-      )
-      Stream.chunk(moveAsChunkBytes(trailer))
-    }
+  private def _gzip_trailer(
+      bytesInRef: UnsafeMutableContainer[Long],
+      crc32: CRC32
+  ): Stream[F, Byte] = {
+    val bytesIn = bytesInRef.get
+    // See RFC 1952: https://www.ietf.org/rfc/rfc1952.txt
+    val crc = crc32.getValue() & 0xffffffff
+    val crc32Value = crc
+    val trailer = Array[Byte](
+      (crc32Value & 0xff).toByte, // CRC-32: Cyclic Redundancy Check
+      ((crc32Value >> 8) & 0xff).toByte,
+      ((crc32Value >> 16) & 0xff).toByte,
+      ((crc32Value >> 24) & 0xff).toByte,
+      (bytesIn & 0xff).toByte, // ISIZE: Input size
+      ((bytesIn >> 8) & 0xff).toByte,
+      ((bytesIn >> 16) & 0xff).toByte,
+      ((bytesIn >> 24) & 0xff).toByte
+    )
+    Stream.chunk(moveAsChunkBytes(trailer))
+  }
 
   def gunzip(
       inflate: Stream[F, Byte] => Stream[
         F,
-        (Stream[F, Byte], Ref[F, Chunk[Byte]], Ref[F, Long], Ref[F, Long])
+        (
+            Stream[F, Byte],
+            UnsafeMutableContainer[Chunk[Byte]],
+            UnsafeMutableContainer[Long],
+            UnsafeMutableContainer[Long]
+        )
       ],
       inflateParams: InflateParams
   ): Stream[F, Byte] => Stream[F, GunzipResult[F]] =
@@ -190,7 +198,12 @@ class Gzip[F[_]](implicit F: Sync[F]) {
       streamAfterMandatoryHeader: Stream[F, Byte],
       inflate: Stream[F, Byte] => Stream[
         F,
-        (Stream[F, Byte], Ref[F, Chunk[Byte]], Ref[F, Long], Ref[F, Long])
+        (
+            Stream[F, Byte],
+            UnsafeMutableContainer[Chunk[Byte]],
+            UnsafeMutableContainer[Long],
+            UnsafeMutableContainer[Long]
+        )
       ]
   ) = {
     (mandatoryHeaderChunk.size, mandatoryHeaderChunk.toArraySlice.values) match {
@@ -327,7 +340,12 @@ class Gzip[F[_]](implicit F: Sync[F]) {
       secondsSince197001010000: Long,
       inflate: Stream[F, Byte] => Stream[
         F,
-        (Stream[F, Byte], Ref[F, Chunk[Byte]], Ref[F, Long], Ref[F, Long])
+        (
+            Stream[F, Byte],
+            UnsafeMutableContainer[Chunk[Byte]],
+            UnsafeMutableContainer[Long],
+            UnsafeMutableContainer[Long]
+        )
       ]
   ): Stream[F, GunzipResult[F]] =
     _gunzip_skipOptionalExtraField(gzipFlag.fextra(flags), headerCrc32)(streamAfterMandatoryHeader)
@@ -388,6 +406,57 @@ class Gzip[F[_]](implicit F: Sync[F]) {
   ): Stream[F, Byte] => Stream[F, Stream[F, Byte]] =
     stream =>
       if (isPresent) {
+//
+//        def go(skip: Int): Stream[F, Byte] => Pull[F, Stream[F, Byte], Unit] =
+//          _.pull.uncons.flatMap {
+//            case None =>
+//              Pull.raiseError(
+//                new ZipException("Failed to read optional extra field header length")
+//              )
+//            case Some((hd, rest)) =>
+//              val size = hd.size
+//              if (size == skip) {
+//                crc32Builder.updateChunk(hd)
+//                Pull.output1(rest)
+//              } else if (size < skip) {
+//                crc32Builder.updateChunk(hd)
+//                go(skip - size)(rest)
+//              } else {
+//                val (pfx, sfx) = hd.splitAt(size - skip + 1)
+//                crc32Builder.updateChunk(pfx)
+//                Pull.output1(rest.cons(sfx))
+//              }
+//          }
+//
+//        def readSizeAndGo(acc: Chunk[Byte]): Stream[F, Byte] => Pull[F, Stream[F, Byte], Unit] =
+//          _.pull.uncons.flatMap {
+//            case None =>
+//              Pull.raiseError(
+//                new ZipException("Failed to read optional extra field header length")
+//              )
+//            case Some((hd, rest)) =>
+//              val size = hd.size
+//              if (size + acc.size >= gzipOptionalExtraFieldLengthBytes) {
+//                val (pfx, sfx) = hd.splitAt(gzipOptionalExtraFieldLengthBytes - acc.size)
+//                val sizeChunk = acc ++ pfx
+//                val firstByte = sizeChunk(0)
+//                val secondByte = sizeChunk(1)
+//                val optionalExtraFieldLength = unsignedToInt(firstByte, secondByte)
+//                if (sfx.size >= optionalExtraFieldLength) {
+//                  val (skip, tail) = sfx.splitAt(sfx.size - optionalExtraFieldLength + 1)
+//                  crc32Builder.updateChunk(skip)
+//                  Pull.output1(rest.cons(tail))
+//                } else {
+//                  crc32Builder.updateChunk(sfx)
+//                  go(optionalExtraFieldLength - sfx.size)(rest)
+//                }
+//              } else {
+//                crc32Builder.updateChunk(hd)
+//                readSizeAndGo(acc ++ hd)(rest)
+//              }
+//          }
+//
+//        readSizeAndGo(Chunk.empty)(stream).stream
         stream.pull
           .unconsN(gzipOptionalExtraFieldLengthBytes)
           .flatMap {
@@ -492,13 +561,13 @@ class Gzip[F[_]](implicit F: Sync[F]) {
       else stream
 
   private def _gunzip_validateTrailer(
-      trailerStream: Ref[F, Chunk[Byte]],
-      crc32: Ref[F, Long],
-      bytesWritten: Ref[F, Long]
+      trailerStream: UnsafeMutableContainer[Chunk[Byte]],
+      crc32: UnsafeMutableContainer[Long],
+      bytesWritten: UnsafeMutableContainer[Long]
   ): Stream[F, Byte] =
     Stream
       .eval {
-        (trailerStream.get, crc32.get, bytesWritten.get).tupled.flatMap[Unit] {
+        F.delay((trailerStream.get, crc32.get, bytesWritten.get)).flatMap[Unit] {
           case (trailerChunk, crc32, actualInputSize) =>
             if (trailerChunk.size != gzipTrailerBytes) {
               F.raiseError(new ZipException(s"Failed to read trailer (1): $trailerChunk"))
