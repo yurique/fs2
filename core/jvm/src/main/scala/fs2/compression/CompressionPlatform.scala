@@ -25,7 +25,7 @@ package compression
 import cats.effect.Ref
 import cats.effect.kernel.Sync
 import cats.syntax.all._
-import fs2.compression.internal.CrcBuilder
+import fs2.compression.internal.{ChunkInflater, CrcBuilder, InflatePipe, MakeChunkInflater}
 
 import java.time.Instant
 import java.util.concurrent.TimeUnit
@@ -125,6 +125,51 @@ private[compression] trait CompressionPlatform[F[_]] { self: Compression[F] =>
 }
 
 private[compression] trait CompressionCompanionPlatform {
+
+  private implicit def makeChunkInflaterForSync[F[_]](implicit
+      F: Sync[F]
+  ): MakeChunkInflater[F] = new MakeChunkInflater[F] {
+
+    def withChunkInflater(
+        inflateParams: InflateParams
+    )(
+        body: ChunkInflater[F] => Pull[F, Byte, Unit]
+    ): Pull[F, Byte, Unit] =
+      Pull
+        .bracketCase[F, Byte, Inflater, Unit](
+          Pull.eval(F.delay(new Inflater(inflateParams.header.juzDeflaterNoWrap))),
+          inflater => body(chunkInflater(inflateParams, inflater)),
+          (inflater, _) => Pull.eval(F.delay(inflater.end()))
+        )
+
+    private def chunkInflater[F[_]](
+        inflateParams: InflateParams,
+        inflater: Inflater
+    ): ChunkInflater[F] = {
+      val inflatedBuffer = new Array[Byte](inflateParams.bufferSizeOrMinimum)
+      new ChunkInflater[F] {
+        def inflateChunk(
+            bytesChunk: Chunk.ArraySlice[Byte],
+            offset: Int
+        ): Pull[F, INothing, (Chunk[Byte], Int, Boolean)] = {
+          inflater.setInput(
+            bytesChunk.values,
+            bytesChunk.offset + offset,
+            bytesChunk.length - offset
+          )
+          val inflatedBytes = inflater.inflate(inflatedBuffer)
+          Pull.pure(
+            (
+              copyAsChunkBytes(inflatedBuffer, inflatedBytes),
+              inflater.getRemaining,
+              inflater.finished()
+            )
+          )
+        }
+      }
+    }
+
+  }
 
   implicit def forSync[F[_]](implicit F: Sync[F]): Compression[F] =
     new Compression.UnsealedCompression[F] {
@@ -233,134 +278,7 @@ private[compression] trait CompressionCompanionPlatform {
         * @param inflateParams See [[compression.InflateParams]]
         */
       def inflate(inflateParams: InflateParams): Pipe[F, Byte, Byte] =
-        stream => _inflate_chunks(inflateParams, none, none, none, trailerSize = 0)(stream)
-
-      private def inflateAndTrailer(
-          inflateParams: InflateParams,
-          trailerSize: Int
-      ): Stream[F, Byte] => Stream[
-        F,
-        (Stream[F, Byte], Ref[F, Chunk[Byte]], Ref[F, Long], Ref[F, Long])
-      ] = in =>
-        Stream.suspend {
-          Stream
-            .eval(
-              (
-                Ref.of[F, Chunk[Byte]](Chunk.empty),
-                Ref.of[F, Long](0),
-                Ref.of[F, Long](0)
-              ).tupled
-            )
-            .map { case (trailerChunk, bytesWritten, crc32) =>
-              (
-                _inflate_chunks(
-                  inflateParams,
-                  trailerChunk.some,
-                  bytesWritten.some,
-                  crc32.some,
-                  trailerSize
-                )(
-                  in
-                ),
-                trailerChunk,
-                bytesWritten,
-                crc32
-              )
-            }
-        }
-
-      private def _inflate_chunks(
-          inflateParams: InflateParams,
-          trailerChunk: Option[Ref[F, Chunk[Byte]]],
-          bytesWritten: Option[Ref[F, Long]],
-          crc32: Option[Ref[F, Long]],
-          trailerSize: Int
-      ): Stream[F, Byte] => Stream[F, Byte] = stream =>
-        Pull
-          .bracketCase[F, Byte, Inflater, Unit](
-            Pull.eval(F.delay(new Inflater(inflateParams.header.juzDeflaterNoWrap))),
-            inflater => {
-              val track = trailerChunk.isDefined && bytesWritten.isDefined && crc32.isDefined
-              val inflatedBuffer = new Array[Byte](inflateParams.bufferSizeOrMinimum)
-              val crcBuilder = new CrcBuilder
-
-              def setRefs(trailerBytes: Chunk[Byte]) =
-                Pull.eval {
-                  trailerChunk.fold(F.unit)(_.set(trailerBytes)) >>
-                    bytesWritten.fold(F.unit)(_.set(inflater.getBytesWritten)) >>
-                    crc32.fold(F.unit)(_.set(crcBuilder.getValue))
-                }
-
-              def setTrailerChunk(
-                  remaining: Chunk[Byte]
-              ): Stream[F, Byte] => Pull[F, INothing, Unit] =
-                _.pull.uncons.flatMap {
-                  case None =>
-                    setRefs(remaining)
-                  case Some((chunk, rest)) =>
-                    if (remaining.size + chunk.size > trailerSize) {
-                      setRefs(remaining ++ chunk.take(trailerSize - remaining.size))
-                    } else {
-                      setTrailerChunk(remaining ++ chunk)(rest)
-                    }
-                }
-
-              def inflateChunk(
-                  bytesChunk: Chunk.ArraySlice[Byte],
-                  offset: Int
-              ): Pull[F, Byte, Option[Chunk[Byte]]] = {
-                inflater.setInput(
-                  bytesChunk.values,
-                  bytesChunk.offset + offset,
-                  bytesChunk.length - offset
-                )
-                val inflatedBytes = inflater.inflate(inflatedBuffer)
-                if (track) crcBuilder.update(inflatedBuffer, 0, inflatedBytes)
-                Pull.output(copyAsChunkBytes(inflatedBuffer, inflatedBytes)) >> {
-                  val remainingBytes = inflater.getRemaining
-                  if (!inflater.finished()) {
-                    if (remainingBytes > 0)
-                      inflateChunk(bytesChunk, bytesChunk.length - remainingBytes)
-                    else
-                      Pull.pure(none)
-                  } else {
-                    if (remainingBytes > 0)
-                      Pull.pure(
-                        Chunk
-                          .array(
-                            bytesChunk.values,
-                            bytesChunk.offset + bytesChunk.length - remainingBytes,
-                            if (remainingBytes < trailerSize) remainingBytes
-                            else trailerSize // don't need more than that
-                          )
-                          .some
-                      )
-                    else
-                      Pull.pure(Chunk.empty.some)
-                  }
-                }
-              }
-
-              def pull: Stream[F, Byte] => Pull[F, Byte, Unit] = in =>
-                in.pull.uncons.flatMap {
-                  case None => Pull.done
-                  case Some((chunk, rest)) =>
-                    inflateChunk(chunk.toArraySlice, 0).flatMap {
-                      case None => pull(rest)
-                      case Some(remaining) =>
-                        if (track) {
-                          setTrailerChunk(remaining)(rest)
-                        } else {
-                          Pull.done
-                        }
-                    }
-                }
-
-              pull(stream)
-            },
-            (inflater, _) => Pull.eval(F.delay(inflater.end()))
-          )
-          .stream
+        InflatePipe.inflateChunks(inflateParams, none, none, none, trailerSize = 0)
 
       def gzip(
           fileName: Option[String],
@@ -378,14 +296,18 @@ private[compression] trait CompressionCompanionPlatform {
         )
 
       def gunzip(inflateParams: InflateParams): Stream[F, Byte] => Stream[F, GunzipResult[F]] =
-        gzip.gunzip(inflateAndTrailer(inflateParams, gzip.gzipTrailerBytes), inflateParams)
-
-      private def copyAsChunkBytes(values: Array[Byte], length: Int): Chunk[Byte] =
-        if (length > 0) {
-          val target = new Array[Byte](length)
-          System.arraycopy(values, 0, target, 0, length)
-          Chunk.array(target, 0, length)
-        } else Chunk.empty[Byte]
+        gzip.gunzip(
+          InflatePipe.inflateAndTrailer(inflateParams, gzip.gzipTrailerBytes),
+          inflateParams
+        )
 
     }
+
+  private def copyAsChunkBytes(values: Array[Byte], length: Int): Chunk[Byte] =
+    if (length > 0) {
+      val target = new Array[Byte](length)
+      System.arraycopy(values, 0, target, 0, length)
+      Chunk.array(target, 0, length)
+    } else Chunk.empty[Byte]
+
 }
