@@ -77,6 +77,7 @@ object InflatePipe {
 //                println(s"remainingBytes: $remainingBytes")
 //                println(s"finished: $finished")
                 if (track) crcBuilder.update(inflatedChunk)
+
                 Pull.output(inflatedChunk) >> {
                   if (!finished) {
                     if (remainingBytes > 0) {
