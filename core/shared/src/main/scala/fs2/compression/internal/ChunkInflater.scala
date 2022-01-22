@@ -26,12 +26,10 @@ package internal
 trait ChunkInflater[F[_]] {
 
   /** @param bytesChunk bytes to inflate
-    * @param offset offset
     * @return (inflatedChunk, remainingBytes, finished)
     */
   def inflateChunk(
-      bytesChunk: Chunk.ArraySlice[Byte],
-      offset: Int
+      bytesChunk: Chunk[Byte]
   ): Pull[F, INothing, (Chunk[Byte], Int, Boolean)]
 
 }
