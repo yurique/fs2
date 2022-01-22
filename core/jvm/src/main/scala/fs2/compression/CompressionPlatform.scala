@@ -149,13 +149,13 @@ private[compression] trait CompressionCompanionPlatform {
       val inflatedBuffer = new Array[Byte](inflateParams.bufferSizeOrMinimum)
       new ChunkInflater[F] {
         def inflateChunk(
-            bytesChunk: Chunk.ArraySlice[Byte],
-            offset: Int
+            bytesChunk: Chunk[Byte]
         ): Pull[F, INothing, (Chunk[Byte], Int, Boolean)] = {
+          val slice = bytesChunk.toArraySlice
           inflater.setInput(
-            bytesChunk.values,
-            bytesChunk.offset + offset,
-            bytesChunk.length - offset
+            slice.values,
+            slice.offset,
+            slice.length
           )
           val inflatedBytes = inflater.inflate(inflatedBuffer)
           Pull.pure(

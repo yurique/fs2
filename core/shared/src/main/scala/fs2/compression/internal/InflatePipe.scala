@@ -68,23 +68,20 @@ object InflatePipe {
             }
 
           def inflateChunk(
-              bytesChunk: Chunk.ArraySlice[Byte],
-              offset: Int,
+              bytesChunk: Chunk[Byte],
               inflatedBytesSoFar: Long
           ): Pull[F, Byte, (Chunk[Byte], Long, Boolean)] =
-            inflater.inflateChunk(bytesChunk, offset).flatMap {
+            inflater.inflateChunk(bytesChunk).flatMap {
               case (inflatedChunk, remainingBytes, finished) =>
 //                println(s"inflatedBytes: ${inflatedChunk.size}")
 //                println(s"remainingBytes: $remainingBytes")
 //                println(s"finished: $finished")
                 if (track) crcBuilder.update(inflatedChunk)
-                Chunk.empty.takeRight(2)
                 Pull.output(inflatedChunk) >> {
                   if (!finished) {
                     if (remainingBytes > 0) {
                       inflateChunk(
-                        bytesChunk,
-                        bytesChunk.length - remainingBytes,
+                        bytesChunk.takeRight(remainingBytes),
                         inflatedBytesSoFar + inflatedChunk.size
                       )
                     } else {
@@ -93,12 +90,7 @@ object InflatePipe {
                   } else {
                     val remainingChunk =
                       if (remainingBytes > 0) {
-                        Chunk
-                          .array(
-                            bytesChunk.values,
-                            bytesChunk.offset + bytesChunk.length - remainingBytes,
-                            remainingBytes
-                          )
+                        bytesChunk.takeRight(remainingBytes)
                       } else {
                         Chunk.empty
                       }
@@ -117,7 +109,7 @@ object InflatePipe {
             in.pull.uncons.flatMap {
               case None => Pull.done
               case Some((chunk, rest)) =>
-                inflateChunk(chunk.toArraySlice, 0, 0).flatMap {
+                inflateChunk(chunk, 0).flatMap {
                   case (
                         remaining @ _, // remaining will be Chunk.empty
                         chunkBytesWritten,
