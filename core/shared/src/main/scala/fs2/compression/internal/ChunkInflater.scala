@@ -25,7 +25,7 @@ package internal
 
 trait ChunkInflater[F[_]] {
 
-  def end: Pull[F, INothing, Unit]
+  def end: Pull[F, INothing, Boolean]
 
   /** @param bytesChunk bytes to inflate
     * @param offset offset

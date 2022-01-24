@@ -138,8 +138,6 @@ private[compression] trait CompressionCompanionPlatform {
       Pull
         .bracketCase[F, Byte, Inflater, Unit](
           Pull.eval(F.delay {
-            println(s"-" * 60)
-            println("creating new inflater")
             new Inflater(inflateParams.header.juzDeflaterNoWrap)
           }),
           inflater => body(chunkInflater(inflateParams, inflater)),
@@ -152,8 +150,9 @@ private[compression] trait CompressionCompanionPlatform {
     ): ChunkInflater[F] = {
       val inflatedBuffer = new Array[Byte](inflateParams.bufferSizeOrMinimum)
       new ChunkInflater[F] {
-        def end: Pull[F, INothing, Unit] = Pull.pure {
+        def end: Pull[F, INothing, Boolean] = Pull.pure {
           inflater.end()
+          false
         }
 
         def inflateChunk(
@@ -171,7 +170,7 @@ private[compression] trait CompressionCompanionPlatform {
               inflatedBuffer,
               inflatedBytes,
               bytesChunk.copy(
-                offset = bytesChunk.length - remaining,
+                offset = bytesChunk.offset + (bytesChunk.length - remaining),
                 length = remaining
               ),
               inflater.finished()

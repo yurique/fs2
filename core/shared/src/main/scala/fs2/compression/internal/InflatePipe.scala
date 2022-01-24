@@ -140,24 +140,31 @@ object InflatePipe {
           def pull(inflatedBytesSoFar: Long): Stream[F, Byte] => Pull[F, Byte, Unit] = in =>
             in.pull.uncons.flatMap {
               case None =>
-                inflater.end >>
-                  drain(inflatedBytesSoFar).flatMap {
-                    case (
-                          _,
-                          _,
-                          false // not finished
-                        ) =>
-                      Pull.raiseError(new RuntimeException("drain did not "))
-                    case (
-                          remaining,
-                          inflatedBytesTotal,
-                          true // finished
-                        ) =>
-                      if (track)
-                        setTrailerChunk(remaining, inflatedBytesTotal)(Stream.empty)
-                      else
-                        Pull.done
-                  }
+                inflater.end.flatMap {
+                  case true =>
+                    drain(inflatedBytesSoFar).flatMap {
+                      case (
+                            _,
+                            _,
+                            false // not finished
+                          ) =>
+                        Pull.raiseError(new RuntimeException("drain did not "))
+                      case (
+                            remaining,
+                            inflatedBytesTotal,
+                            true // finished
+                          ) =>
+                        if (track)
+                          setTrailerChunk(remaining, inflatedBytesTotal)(Stream.empty)
+                        else
+                          Pull.done
+                    }
+                  case false =>
+                    if (track)
+                      setTrailerChunk(Chunk.empty, inflatedBytesSoFar)(Stream.empty)
+                    else
+                      Pull.done
+                }
               case Some((chunk, rest)) =>
                 inflateChunk(chunk.toArraySlice, 0).flatMap {
                   case (

@@ -51,9 +51,6 @@ private[fs2] trait compressionplatform {
       Pull.bracketCase[F, Byte, (Duplex, Readable, zlibMod.Zlib), Unit](
         Pull.eval {
           F.delay {
-            println(s"-" * 60)
-            println("creating new inflater")
-
             val options = zlibMod
               .ZlibOptions()
               .setChunkSize(inflateParams.bufferSizeOrMinimum.toDouble)
@@ -129,9 +126,10 @@ private[fs2] trait compressionplatform {
       }
 
       new ChunkInflater[F] {
-        def end: Pull[F, INothing, Unit] = Pull.pure {
+        def end: Pull[F, INothing, Boolean] = Pull.pure {
           if (print) println(s"got end")
           writable.end()
+          true
         }
 
         def inflateChunk(
