@@ -28,6 +28,8 @@ import fs2.{Chunk, INothing, Pull, Stream}
 
 object InflatePipe {
 
+  private val emptySlice = Chunk.ArraySlice(Array.empty[Byte], 0, 0)
+
   def inflateChunks[F[_]](
       inflateParams: InflateParams,
       trailerChunkRef: Option[Ref[F, Chunk[Byte]]],
@@ -69,42 +71,29 @@ object InflatePipe {
 
           def inflateChunk(
               bytesChunk: Chunk.ArraySlice[Byte],
-              offset: Int,
               inflatedBytesSoFar: Long
           ): Pull[F, Byte, (Chunk[Byte], Long, Boolean)] =
-            inflater.inflateChunk(bytesChunk, offset).flatMap {
+            inflater.inflateChunk(bytesChunk).flatMap {
               case (inflatedArray, inflatedLength, remainingBytes, finished) =>
-//                println(s"inflatedBytes: ${inflatedChunk.size}")
-//                println(s"remainingBytes: $remainingBytes")
+//                println(s"inflatedBytes: ${inflatedLength}")
+//                println(s"remainingBytes: ${remainingBytes.length}")
 //                println(s"finished: $finished")
                 if (track) crcBuilder.update(inflatedArray, 0, inflatedLength)
                 val inflatedChunk = copyAsChunkBytes(inflatedArray, inflatedLength)
                 Pull.output(inflatedChunk) >> {
                   if (!finished) {
-                    if (remainingBytes > 0) {
+                    if (remainingBytes.nonEmpty) {
                       inflateChunk(
-                        bytesChunk,
-                        bytesChunk.length - remainingBytes,
+                        remainingBytes,
                         inflatedBytesSoFar + inflatedChunk.size
                       )
                     } else {
                       Pull.pure((Chunk.empty, inflatedBytesSoFar + inflatedChunk.size, false))
                     }
                   } else {
-                    val remainingChunk =
-                      if (remainingBytes > 0) {
-                        Chunk
-                          .array(
-                            bytesChunk.values,
-                            bytesChunk.offset + bytesChunk.length - remainingBytes,
-                            remainingBytes
-                          )
-                      } else {
-                        Chunk.empty
-                      }
                     Pull.pure(
                       (
-                        remainingChunk,
+                        remainingBytes,
                         inflatedBytesSoFar + inflatedChunk.size,
                         true
                       )
@@ -113,24 +102,77 @@ object InflatePipe {
                 }
             }
 
-          def pull(bytesWritten: Long): Stream[F, Byte] => Pull[F, Byte, Unit] = in =>
+          def drain(inflatedBytesSoFar: Long): Pull[F, Byte, (Chunk[Byte], Long, Boolean)] =
+//            println(s"[drain]... inflatedBytesSoFar: $inflatedBytesSoFar")
+
+            inflater.inflateChunk(emptySlice).flatMap {
+              case (inflatedArray, inflatedLength, remainingBytes, finished) =>
+//                println(s"[drain] inflatedBytes: ${inflatedLength}")
+//                println(s"[drain] remainingBytes: $remainingBytes")
+//                println(s"[drain] finished: $finished")
+                val p =
+                  if (inflatedLength == 0) {
+                    Pull.done
+                  } else {
+                    if (track) crcBuilder.update(inflatedArray, 0, inflatedLength)
+                    val inflatedChunk = copyAsChunkBytes(inflatedArray, inflatedLength)
+                    Pull.output(inflatedChunk)
+                  }
+
+                p >> {
+                  if (!finished) {
+                    drain(
+                      inflatedBytesSoFar + inflatedLength
+                    )
+                  } else {
+                    Pull.pure(
+                      (
+                        remainingBytes,
+                        inflatedBytesSoFar + inflatedLength,
+                        true
+                      )
+                    )
+                  }
+                }
+
+            }
+
+          def pull(inflatedBytesSoFar: Long): Stream[F, Byte] => Pull[F, Byte, Unit] = in =>
             in.pull.uncons.flatMap {
-              case None => Pull.done
+              case None =>
+                inflater.end >>
+                  drain(inflatedBytesSoFar).flatMap {
+                    case (
+                          _,
+                          _,
+                          false // not finished
+                        ) =>
+                      Pull.raiseError(new RuntimeException("drain did not "))
+                    case (
+                          remaining,
+                          inflatedBytesTotal,
+                          true // finished
+                        ) =>
+                      if (track)
+                        setTrailerChunk(remaining, inflatedBytesTotal)(Stream.empty)
+                      else
+                        Pull.done
+                  }
               case Some((chunk, rest)) =>
-                inflateChunk(chunk.toArraySlice, 0, 0).flatMap {
+                inflateChunk(chunk.toArraySlice, 0).flatMap {
                   case (
                         remaining @ _, // remaining will be Chunk.empty
                         chunkBytesWritten,
                         false // not finished
                       ) =>
-                    pull(bytesWritten + chunkBytesWritten)(rest)
+                    pull(inflatedBytesSoFar + chunkBytesWritten)(rest)
                   case (
                         remaining,
                         chunkBytesWritten,
                         true // finished
                       ) =>
                     if (track)
-                      setTrailerChunk(remaining, bytesWritten + chunkBytesWritten)(rest)
+                      setTrailerChunk(remaining, inflatedBytesSoFar + chunkBytesWritten)(rest)
                     else
                       Pull.done
                 }

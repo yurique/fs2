@@ -137,7 +137,11 @@ private[compression] trait CompressionCompanionPlatform {
     ): Pull[F, Byte, Unit] =
       Pull
         .bracketCase[F, Byte, Inflater, Unit](
-          Pull.eval(F.delay(new Inflater(inflateParams.header.juzDeflaterNoWrap))),
+          Pull.eval(F.delay {
+//            println(s"-" * 60)
+//            println("creating new inflater")
+            new Inflater(inflateParams.header.juzDeflaterNoWrap)
+          }),
           inflater => body(chunkInflater(inflateParams, inflater)),
           (inflater, _) => Pull.eval(F.delay(inflater.end()))
         )
@@ -148,21 +152,28 @@ private[compression] trait CompressionCompanionPlatform {
     ): ChunkInflater[F] = {
       val inflatedBuffer = new Array[Byte](inflateParams.bufferSizeOrMinimum)
       new ChunkInflater[F] {
+        def end: Pull[F, INothing, Unit] = Pull.pure {
+          inflater.end()
+        }
+
         def inflateChunk(
-            bytesChunk: Chunk.ArraySlice[Byte],
-            offset: Int
-        ): Pull[F, INothing, (Array[Byte], Int, Int, Boolean)] = {
+            bytesChunk: Chunk.ArraySlice[Byte]
+        ): Pull[F, INothing, (Array[Byte], Int, Chunk.ArraySlice[Byte], Boolean)] = {
           inflater.setInput(
             bytesChunk.values,
-            bytesChunk.offset + offset,
-            bytesChunk.length - offset
+            bytesChunk.offset,
+            bytesChunk.length
           )
           val inflatedBytes = inflater.inflate(inflatedBuffer)
+          val remaining = inflater.getRemaining
           Pull.pure(
             (
               inflatedBuffer,
               inflatedBytes,
-              inflater.getRemaining,
+              bytesChunk.copy(
+                offset = bytesChunk.length - remaining,
+                length = remaining
+              ),
               inflater.finished()
             )
           )

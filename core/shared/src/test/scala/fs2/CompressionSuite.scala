@@ -215,7 +215,7 @@ abstract class CompressionSuite(implicit compression: Compression[IO]) extends F
 //          .map(it => assert(it.sameElements(getBytes(s))))
 //    }
 //  }
-
+//
 //  test("deflate.compresses input") {
 //    val uncompressed =
 //      getBytes(""""
@@ -231,29 +231,29 @@ abstract class CompressionSuite(implicit compression: Compression[IO]) extends F
 //      .toVector
 //      .map(compressed => assert(compressed.length < uncompressed.length))
 //  }
-
-  test("deflate and inflate are reusable") {
-    val bytesIn: Int = 1024 * 1024
-    val chunkSize = 1024
-    val deflater = Compression[IO].deflate(DeflateParams(bufferSize = chunkSize))
-    val inflater = Compression[IO].inflate(InflateParams(bufferSize = chunkSize))
-    val stream = Stream
-      .chunk[IO, Byte](Chunk.array(1.to(bytesIn).map(_.toByte).toArray))
-      .through(deflater)
-      .through(inflater)
-    for {
-      first <-
-        stream
-          .fold(Vector.empty[Byte]) { case (vector, byte) => vector :+ byte }
-          .compile
-          .last
-      second <-
-        stream
-          .fold(Vector.empty[Byte]) { case (vector, byte) => vector :+ byte }
-          .compile
-          .last
-    } yield assertEquals(first, second)
-  }
+//
+//  test("deflate and inflate are reusable") {
+//    val bytesIn: Int = 1024 * 1024
+//    val chunkSize = 1024
+//    val deflater = Compression[IO].deflate(DeflateParams(bufferSize = chunkSize))
+//    val inflater = Compression[IO].inflate(InflateParams(bufferSize = chunkSize))
+//    val stream = Stream
+//      .chunk[IO, Byte](Chunk.array(1.to(bytesIn).map(_.toByte).toArray))
+//      .through(deflater)
+//      .through(inflater)
+//    for {
+//      first <-
+//        stream
+//          .fold(Vector.empty[Byte]) { case (vector, byte) => vector :+ byte }
+//          .compile
+//          .last
+//      second <-
+//        stream
+//          .fold(Vector.empty[Byte]) { case (vector, byte) => vector :+ byte }
+//          .compile
+//          .last
+//    } yield assertEquals(first, second)
+//  }
 //
 //  test("deflate |> inflate ~= id") {
 //    forAllF {
@@ -393,6 +393,8 @@ abstract class CompressionSuite(implicit compression: Compression[IO]) extends F
 //    }
 //  }
 //
+//  override def scalaCheckInitialSeed = "Xf5NPB2jQW5-wZXcdI9z80NtXBKC-JhVM2tacQEBvOD="
+//
 //  test("gzip |> gunzip ~= id (mutually prime chunk sizes, compression larger)") {
 //    forAllF {
 //      (
@@ -402,6 +404,12 @@ abstract class CompressionSuite(implicit compression: Compression[IO]) extends F
 //          flushMode: DeflateParams.FlushMode,
 //          epochSeconds: Int
 //      ) =>
+////        println("-" * 60)
+////        println(s"test data: ${Chunk.array(s.getBytes).size} bytes")
+////        println(s"test level: $level")
+////        println(s"test strategy: $strategy")
+////        println(s"test flushMode: $flushMode")
+////        println(s"test epochSeconds: $epochSeconds")
 //        val expectedFileName = Option(toEncodableFileName(s))
 //        val expectedComment = Option(toEncodableComment(s))
 //        val expectedMTime = Option(FiniteDuration(epochSeconds.toLong, TimeUnit.SECONDS))
@@ -588,29 +596,29 @@ abstract class CompressionSuite(implicit compression: Compression[IO]) extends F
 //      .assertEquals(expectedContent)
 //  }
 //
-//  test("gzip and gunzip are reusable") {
-//    val bytesIn: Int = 1024 * 1024
-//    val chunkSize = 1024
-//    val gzipStream = Compression[IO].gzip(bufferSize = chunkSize)
-//    val gunzipStream = Compression[IO].gunzip(bufferSize = chunkSize)
-//    val stream = Stream
-//      .chunk[IO, Byte](Chunk.array(1.to(bytesIn).map(_.toByte).toArray))
-//      .through(gzipStream)
-//      .through(gunzipStream)
-//      .flatMap(_.content)
-//    for {
-//      first <-
-//        stream
-//          .fold(Vector.empty[Byte]) { case (vector, byte) => vector :+ byte }
-//          .compile
-//          .last
-//      second <-
-//        stream
-//          .fold(Vector.empty[Byte]) { case (vector, byte) => vector :+ byte }
-//          .compile
-//          .last
-//    } yield assertEquals(first, second)
-//  }
+  test("gzip and gunzip are reusable") {
+    val bytesIn: Int = 1024 * 1024
+    val chunkSize = 1024
+    val gzipStream = Compression[IO].gzip(bufferSize = chunkSize)
+    val gunzipStream = Compression[IO].gunzip(bufferSize = chunkSize)
+    val stream = Stream
+      .chunk[IO, Byte](Chunk.array(1.to(bytesIn).map(_.toByte).toArray))
+      .through(gzipStream)
+      .through(gunzipStream)
+      .flatMap(_.content)
+    for {
+      first <-
+        stream
+          .fold(Vector.empty[Byte]) { case (vector, byte) => vector :+ byte }
+          .compile
+          .last
+      second <-
+        stream
+          .fold(Vector.empty[Byte]) { case (vector, byte) => vector :+ byte }
+          .compile
+          .last
+    } yield assertEquals(first, second)
+  }
 //
 //  group("maybeGunzip") {
 //    def maybeGunzip[F[_]: Compression](s: Stream[F, Byte]): Stream[F, Byte] =

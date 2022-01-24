@@ -29,13 +29,13 @@ import fs2.internal.jsdeps.node.{nodeStrings, zlibMod}
 import fs2.io.internal.SuspendedStream
 import fs2.compression.internal.{ChunkInflater, InflatePipe, MakeChunkInflater}
 import fs2.internal.jsdeps.node.bufferMod.global.Buffer
-import fs2.internal.jsdeps.node.streamMod.{Duplex, Readable}
+import fs2.internal.jsdeps.node.streamMod.{Duplex, Readable, Writable}
 import fs2.io.internal.ByteChunkOps._
 
 import scala.annotation.nowarn
 import scala.concurrent.duration.FiniteDuration
 import scala.scalajs.js
-import scala.scalajs.js.|
+import scala.scalajs.js.{JavaScriptException, |}
 
 private[fs2] trait compressionplatform {
 
@@ -48,97 +48,161 @@ private[fs2] trait compressionplatform {
     )(
         body: ChunkInflater[F] => Pull[F, Byte, Unit]
     ): Pull[F, Byte, Unit] =
-      body(chunkInflater(inflateParams))
+      Pull.bracketCase[F, Byte, (Duplex, Readable, zlibMod.Zlib), Unit](
+        Pull.pure {
+          val options = zlibMod
+            .ZlibOptions()
+            .setChunkSize(inflateParams.bufferSizeOrMinimum.toDouble)
+
+//          fs2.internal.jsdeps.node.nodeConsoleMod.global.console.log(
+//            "options",
+//            options
+//          )
+
+          val writable = (inflateParams.header match {
+            case ZLibParams.Header.GZIP => zlibMod.createInflateRaw(options)
+            case ZLibParams.Header.ZLIB => zlibMod.createInflate(options)
+          }).asInstanceOf[Duplex]
+          val readable = writable.asInstanceOf[Readable]
+          val inflate = writable.asInstanceOf[zlibMod.Zlib]
+          (writable, readable, inflate)
+        },
+        { case (writable, readable, inflate) => body(chunkInflater(writable, readable, inflate)) },
+        (r, _) => Pull.pure(r._3.close())
+      )
+
+    private val emptySlice = Chunk.ArraySlice(Array.empty[Byte], 0, 0)
 
     private def chunkInflater[F[_]](
-        inflateParams: InflateParams
+        writable: Duplex,
+        readable: Readable,
+        inflate: zlibMod.Zlib
     )(implicit F: Async[F]): ChunkInflater[F] = {
-      val options = zlibMod
-        .ZlibOptions()
-        .setChunkSize(inflateParams.bufferSizeOrMinimum.toDouble)
+      var error: Option[js.Error] = None
+      var ended: Boolean = false
+      val print = true
 
-      val writable = (inflateParams.header match {
-        case ZLibParams.Header.GZIP => zlibMod.createInflateRaw(options)
-        case ZLibParams.Header.ZLIB => zlibMod.createInflate(options)
-      }).asInstanceOf[Duplex]
-      val readable = writable.asInstanceOf[Readable]
-      val inflate = writable.asInstanceOf[zlibMod.Zlib]
+      val onError: js.Function1[Any, Unit] = { e =>
+        if (print) println(s"  . readable.error: ${e}")
+        error = e.asInstanceOf[js.Error].some
+      }
+      val onEnd: js.Function1[Any, Unit] = { _ =>
+        if (print) println(s"  . readable.end")
+        ended = true
+      }
+      val onReadable: js.Function1[Any, Unit] = { _ =>
+        if (print) println(s"  . readable.readable")
+      }
+
+      readable.on("error", onError)
+      readable.on("end", onEnd)
+      readable.on("readable", onReadable)
+
+      var bytesSent = 0
+//      var writtenBefore = 0L
+
+      var latestChunks: Seq[Chunk[Byte]] = Seq.empty
+
+      def chunkSent(chunk: Chunk[Byte]): Unit = {
+        bytesSent = bytesSent + chunk.size
+        if (print) println(s"  bytes sent: (+${chunk.size}) $bytesSent")
+        val bytesWritten = inflate.bytesWritten.toLong
+        if (print) println(s"  bytes written: $bytesWritten")
+        val bytesToKeep = bytesSent - bytesWritten
+        if (print) println(s"  bytes to keep: $bytesToKeep")
+        if (bytesToKeep <= chunk.size) {
+          latestChunks = Seq(chunk)
+        } else {
+          latestChunks = latestChunks.inits.toSeq
+            .findLast(init => init.map(_.size).sum >= bytesToKeep - chunk.size)
+            .getOrElse(Seq.empty) :+ chunk
+        }
+        if (print) println(s"  keeping chunks: ${latestChunks.size}")
+      }
+
+      def remainingChunk(lastChunk: Chunk.ArraySlice[Byte]): Chunk.ArraySlice[Byte] = {
+        val bytesWritten = inflate.bytesWritten.toLong
+        if (print) println(s"  [remaining] bytes written: $bytesWritten")
+        val bytesToKeep = bytesSent - bytesWritten
+        if (print) println(s"  [remaining] bytes to keep: $bytesToKeep")
+        Chunk.concat(latestChunks :+ lastChunk).takeRight(bytesToKeep.toInt).toArraySlice
+      }
 
       new ChunkInflater[F] {
+        def end: Pull[F, INothing, Unit] = Pull.pure {
+          if (print) println(s"got end")
+          writable.end()
+        }
+
         def inflateChunk(
-            bytesChunk: Chunk[Byte]
+            bytesChunk: Chunk.ArraySlice[Byte]
         ): Pull[
           F,
           INothing,
-          (Chunk[Byte], Int, Boolean)
-        ] = // (inflatedBuffer, inflatedBytes, remainingBytes, finished)
-          Pull.eval {
-            F.async_[(Chunk[Byte], Int, Boolean)] { cb =>
-              println()
-              println()
-              println(s"got chunk to inflate: ${bytesChunk.size} bytes")
-              readable.read() match {
-                case null =>
-                  println(s"  read before write: null")
+          (
+              Array[Byte],
+              Int,
+              Chunk.ArraySlice[Byte],
+              Boolean
+          ) // (inflatedBuffer, inflatedBytes, remainingBytes, finished)
+        ] =
+          error match {
+            case Some(e) => Pull.raiseError(JavaScriptException(e))
+            case None =>
+              Pull.eval {
+                F.async_[(Array[Byte], Int, Chunk.ArraySlice[Byte], Boolean)] { cb =>
+                  if (print)
+                    println(
+                      s"got chunk to inflate: ${bytesChunk.size} bytes"
+                    )
+//              val writtenBefore = inflate.bytesWritten.toLong
+//              if (print) println(s"  bytes written before: ${writtenBefore}")
+                  readable.read() match {
+                    case null =>
+                      if (print) println(s"  read null; error: $error, ended: $ended")
+                      val writtenNow = inflate.bytesWritten.toLong
+//                      val bytesWriten = writtenNow - writtenBefore
+//                      val bytesRemaining = bytesChunk.size - offset - bytesWriten
+//                      writtenBefore = writtenNow
 
-                  val writtenBefore = inflate.bytesWritten.toLong
-                  val buffer = bytesChunk.toUint8Array
+//                      if (print) println(s"  bytes consumed: ${bytesWriten}")
 
-                  def tryRead(finished: Boolean) = {
-                    val writtenNow = inflate.bytesWritten.toLong
-                    val bytesWriten = writtenNow - writtenBefore
-                    println(s"  bytes written: ${bytesWriten}")
-                    val bytesRemaining = bytesChunk.size - bytesWriten
-                    println(s"  bytes remaining: $bytesRemaining bytes")
-                    val out = readable.read() match {
-                      case null =>
-                        println(s"  read null")
-                        (Chunk.empty[Byte], bytesRemaining.toInt, finished)
-                      case notNull =>
-                        val buffer = notNull.asInstanceOf[Buffer]
-                        val chunk = buffer.toChunk
-                        println(s"  read buffer: ${chunk.size} bytes")
-                        (chunk, bytesRemaining.toInt, finished)
-                    }
-                    cb(out.asRight[Throwable])
+                      if (ended) {
+                        cb((Array.empty[Byte], 0, remainingChunk(bytesChunk), true).asRight)
+                      } else {
+                        if (bytesChunk.nonEmpty) {
+                          val buffer = bytesChunk.toUint8Array
+                          writable.write(
+                            buffer,
+                            e =>
+                              if (!js.isUndefined(e)) {
+                                if (error.isEmpty) {
+                                  error = e.asInstanceOf[js.Error].some
+                                }
+                              }
+                          )
+                          chunkSent(bytesChunk)
+                        }
+                        cb((Array.empty[Byte], 0, emptySlice, false).asRight)
+                      }
+
+                    case notNull =>
+                      val buffer = notNull.asInstanceOf[Buffer]
+                      val chunk = buffer.toChunk
+                      if (print) println(s"  read buffer: ${chunk.size} bytes")
+
+//                      val writtenNow = inflate.bytesWritten.toLong
+//                      val bytesWriten = writtenNow - writtenBefore
+//                      val bytesRemaining = bytesChunk.size - offset - bytesWriten
+//                      writtenBefore = writtenNow
+//                      if (print) println(s"  bytes consumed: ${bytesWriten}")
+
+                      val slice = chunk.toArraySlice
+                      cb((slice.values, slice.length, bytesChunk, false).asRight)
                   }
 
-                  val onError: js.Function1[Any, Unit] = e => println(s"readable.error: ${e}")
-                  val onEnd: js.Function1[Any, Unit] = _ => {
-                    println(s"!!! readable.end")
-                    tryRead(true)
-                  }
-
-                  val onReadable: js.Function1[Any, Unit] = _ => {
-                    println(s"!!! readable.readable")
-                    readable.off("error", onError)
-                    readable.off("end", onEnd)
-                    tryRead(false)
-                  }
-
-                  readable.once("error", onError)
-                  readable.once("end", onEnd)
-                  readable.once("readable", onReadable)
-
-                  val written = writable.write(
-                    buffer,
-                    (e: js.UndefOr[js.Error | Null]) => println(s"callback: $e")
-                    //                  cb(
-                    //                    e.toLeft {
-                    //
-                    //                    }.leftMap(js.JavaScriptException)
-                    //                  )
-                  )
-                  println(s"written: $written")
-
-                case notNull =>
-                  val buffer = notNull.asInstanceOf[Buffer]
-                  val chunk = buffer.toChunk
-                  println(s"  read buffer before write: ${chunk.size} bytes")
-                  cb((chunk, bytesChunk.size, false).asRight)
+                }
               }
-
-            }
           }
       }
     }
