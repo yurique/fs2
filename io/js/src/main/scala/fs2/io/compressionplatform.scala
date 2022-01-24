@@ -49,26 +49,26 @@ private[fs2] trait compressionplatform {
         body: ChunkInflater[F] => Pull[F, Byte, Unit]
     ): Pull[F, Byte, Unit] =
       Pull.bracketCase[F, Byte, (Duplex, Readable, zlibMod.Zlib), Unit](
-        Pull.pure {
-          val options = zlibMod
-            .ZlibOptions()
-            .setChunkSize(inflateParams.bufferSizeOrMinimum.toDouble)
+        Pull.eval {
+          F.delay {
+            println(s"-" * 60)
+            println("creating new inflater")
 
-//          fs2.internal.jsdeps.node.nodeConsoleMod.global.console.log(
-//            "options",
-//            options
-//          )
+            val options = zlibMod
+              .ZlibOptions()
+              .setChunkSize(inflateParams.bufferSizeOrMinimum.toDouble)
 
-          val writable = (inflateParams.header match {
-            case ZLibParams.Header.GZIP => zlibMod.createInflateRaw(options)
-            case ZLibParams.Header.ZLIB => zlibMod.createInflate(options)
-          }).asInstanceOf[Duplex]
-          val readable = writable.asInstanceOf[Readable]
-          val inflate = writable.asInstanceOf[zlibMod.Zlib]
-          (writable, readable, inflate)
+            val writable = (inflateParams.header match {
+              case ZLibParams.Header.GZIP => zlibMod.createInflateRaw(options)
+              case ZLibParams.Header.ZLIB => zlibMod.createInflate(options)
+            }).asInstanceOf[Duplex]
+            val readable = writable.asInstanceOf[Readable]
+            val inflate = writable.asInstanceOf[zlibMod.Zlib]
+            (writable, readable, inflate)
+          }
         },
         { case (writable, readable, inflate) => body(chunkInflater(writable, readable, inflate)) },
-        (r, _) => Pull.pure(r._3.close())
+        (r, _) => Pull.eval(F.delay(r._3.close()))
       )
 
     private val emptySlice = Chunk.ArraySlice(Array.empty[Byte], 0, 0)
@@ -80,7 +80,7 @@ private[fs2] trait compressionplatform {
     )(implicit F: Async[F]): ChunkInflater[F] = {
       var error: Option[js.Error] = None
       var ended: Boolean = false
-      val print = true
+      val print = false
 
       val onError: js.Function1[Any, Unit] = { e =>
         if (print) println(s"  . readable.error: ${e}")

@@ -138,8 +138,8 @@ private[compression] trait CompressionCompanionPlatform {
       Pull
         .bracketCase[F, Byte, Inflater, Unit](
           Pull.eval(F.delay {
-//            println(s"-" * 60)
-//            println("creating new inflater")
+            println(s"-" * 60)
+            println("creating new inflater")
             new Inflater(inflateParams.header.juzDeflaterNoWrap)
           }),
           inflater => body(chunkInflater(inflateParams, inflater)),
