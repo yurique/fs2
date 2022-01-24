@@ -73,12 +73,12 @@ object InflatePipe {
               inflatedBytesSoFar: Long
           ): Pull[F, Byte, (Chunk[Byte], Long, Boolean)] =
             inflater.inflateChunk(bytesChunk, offset).flatMap {
-              case (inflatedChunk, remainingBytes, finished) =>
+              case (inflatedArray, inflatedLength, remainingBytes, finished) =>
 //                println(s"inflatedBytes: ${inflatedChunk.size}")
 //                println(s"remainingBytes: $remainingBytes")
 //                println(s"finished: $finished")
-                if (track) crcBuilder.update(inflatedChunk)
-
+                if (track) crcBuilder.update(inflatedArray, 0, inflatedLength)
+                val inflatedChunk = copyAsChunkBytes(inflatedArray, inflatedLength)
                 Pull.output(inflatedChunk) >> {
                   if (!finished) {
                     if (remainingBytes > 0) {

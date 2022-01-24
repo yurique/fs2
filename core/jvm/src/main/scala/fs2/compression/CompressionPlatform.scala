@@ -151,7 +151,7 @@ private[compression] trait CompressionCompanionPlatform {
         def inflateChunk(
             bytesChunk: Chunk.ArraySlice[Byte],
             offset: Int
-        ): Pull[F, INothing, (Chunk[Byte], Int, Boolean)] = {
+        ): Pull[F, INothing, (Array[Byte], Int, Int, Boolean)] = {
           inflater.setInput(
             bytesChunk.values,
             bytesChunk.offset + offset,
@@ -160,7 +160,8 @@ private[compression] trait CompressionCompanionPlatform {
           val inflatedBytes = inflater.inflate(inflatedBuffer)
           Pull.pure(
             (
-              copyAsChunkBytes(inflatedBuffer, inflatedBytes),
+              inflatedBuffer,
+              inflatedBytes,
               inflater.getRemaining,
               inflater.finished()
             )
