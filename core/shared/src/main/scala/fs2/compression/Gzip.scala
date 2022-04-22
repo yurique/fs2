@@ -518,7 +518,11 @@ class Gzip[F[_]](implicit F: Sync[F]) {
                   )
                 )
               } else if (expectedInputSize != actualInputSize) {
-                F.raiseError[Unit](new ZipException("Content failed size validation"))
+                F.raiseError[Unit](
+                  new ZipException(
+                    s"Content failed size validation: expectedInputSize $expectedInputSize != actualInputSize $actualInputSize"
+                  )
+                )
               } else {
                 F.unit
               }

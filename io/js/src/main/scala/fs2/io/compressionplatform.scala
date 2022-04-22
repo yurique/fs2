@@ -22,17 +22,189 @@
 package fs2
 package io
 
-import cats.effect.{Async, Ref}
+import cats.effect.Async
 import cats.syntax.all._
 import fs2.compression._
-import fs2.internal.jsdeps.node.zlibMod
+import fs2.internal.jsdeps.node.{nodeStrings, zlibMod}
 import fs2.io.internal.SuspendedStream
-import fs2.compression.internal.CrcBuilder
-import fs2.compression.internal.CountPipe
-import fs2.compression.internal.CrcPipe
+import fs2.compression.internal.{ChunkInflater, InflatePipe, MakeChunkInflater}
+import fs2.internal.jsdeps.node.bufferMod.global.Buffer
+import fs2.internal.jsdeps.node.streamMod.{Duplex, Readable, Writable}
+import fs2.io.internal.ByteChunkOps._
+
+import scala.annotation.nowarn
 import scala.concurrent.duration.FiniteDuration
+import scala.scalajs.js
+import scala.scalajs.js.{JavaScriptException, |}
 
 private[fs2] trait compressionplatform {
+
+  private implicit def makeChunkInflaterForAsync[F[_]](implicit
+      F: Async[F]
+  ): MakeChunkInflater[F] = new MakeChunkInflater[F] {
+
+    def withChunkInflater(
+        inflateParams: InflateParams
+    )(
+        body: ChunkInflater[F] => Pull[F, Byte, Unit]
+    ): Pull[F, Byte, Unit] =
+      Pull.bracketCase[F, Byte, (Duplex, Readable, zlibMod.Zlib), Unit](
+        Pull.eval {
+          F.delay {
+            val options = zlibMod
+              .ZlibOptions()
+              .setChunkSize(inflateParams.bufferSizeOrMinimum.toDouble)
+
+            val writable = (inflateParams.header match {
+              case ZLibParams.Header.GZIP => zlibMod.createInflateRaw(options)
+              case ZLibParams.Header.ZLIB => zlibMod.createInflate(options)
+            }).asInstanceOf[Duplex]
+            val readable = writable.asInstanceOf[Readable]
+            val inflate = writable.asInstanceOf[zlibMod.Zlib]
+            (writable, readable, inflate)
+          }
+        },
+        { case (writable, readable, inflate) => body(chunkInflater(writable, readable, inflate)) },
+        (r, _) => Pull.eval(F.delay(r._3.close()))
+      )
+
+    private val emptySlice = Chunk.ArraySlice(Array.empty[Byte], 0, 0)
+
+    private def chunkInflater[F[_]](
+        writable: Duplex,
+        readable: Readable,
+        inflate: zlibMod.Zlib
+    )(implicit F: Async[F]): ChunkInflater[F] = {
+      var error: Option[js.Error] = None
+      var ended: Boolean = false
+      val print = false
+
+      val onError: js.Function1[Any, Unit] = { e =>
+        if (print) println(s"  . readable.error: ${e}")
+        error = e.asInstanceOf[js.Error].some
+      }
+      val onEnd: js.Function1[Any, Unit] = { _ =>
+        if (print) println(s"  . readable.end")
+        ended = true
+      }
+      val onReadable: js.Function1[Any, Unit] = { _ =>
+        if (print) println(s"  . readable.readable")
+      }
+
+      readable.on("error", onError)
+      readable.on("end", onEnd)
+      readable.on("readable", onReadable)
+
+      var bytesSent = 0
+//      var writtenBefore = 0L
+
+      var latestChunks: Seq[Chunk[Byte]] = Seq.empty
+
+      def chunkSent(chunk: Chunk[Byte]): Unit = {
+        bytesSent = bytesSent + chunk.size
+        if (print) println(s"  bytes sent: (+${chunk.size}) $bytesSent")
+        val bytesWritten = inflate.bytesWritten.toLong
+        if (print) println(s"  bytes written: $bytesWritten")
+        val bytesToKeep = bytesSent - bytesWritten
+        if (print) println(s"  bytes to keep: $bytesToKeep")
+        if (bytesToKeep <= chunk.size) {
+          latestChunks = Seq(chunk)
+        } else {
+          latestChunks = latestChunks.inits.toSeq
+            .findLast(init => init.map(_.size).sum >= bytesToKeep - chunk.size)
+            .getOrElse(Seq.empty) :+ chunk
+        }
+        if (print) println(s"  keeping chunks: ${latestChunks.size}")
+      }
+
+      def remainingChunk(lastChunk: Chunk.ArraySlice[Byte]): Chunk.ArraySlice[Byte] = {
+        val bytesWritten = inflate.bytesWritten.toLong
+        if (print) println(s"  [remaining] bytes written: $bytesWritten")
+        val bytesToKeep = bytesSent - bytesWritten
+        if (print) println(s"  [remaining] bytes to keep: $bytesToKeep")
+        Chunk.concat(latestChunks :+ lastChunk).takeRight(bytesToKeep.toInt).toArraySlice
+      }
+
+      new ChunkInflater[F] {
+        def end: Pull[F, INothing, Boolean] = Pull.pure {
+          if (print) println(s"got end")
+          writable.end()
+          true
+        }
+
+        def inflateChunk(
+            bytesChunk: Chunk.ArraySlice[Byte]
+        ): Pull[
+          F,
+          INothing,
+          (
+              Array[Byte],
+              Int,
+              Chunk.ArraySlice[Byte],
+              Boolean
+          ) // (inflatedBuffer, inflatedBytes, remainingBytes, finished)
+        ] =
+          error match {
+            case Some(e) => Pull.raiseError(JavaScriptException(e))
+            case None =>
+              Pull.eval {
+                F.async_[(Array[Byte], Int, Chunk.ArraySlice[Byte], Boolean)] { cb =>
+                  if (print)
+                    println(
+                      s"got chunk to inflate: ${bytesChunk.size} bytes"
+                    )
+//              val writtenBefore = inflate.bytesWritten.toLong
+//              if (print) println(s"  bytes written before: ${writtenBefore}")
+                  readable.read() match {
+                    case null =>
+                      if (print) println(s"  read null; error: $error, ended: $ended")
+                      val writtenNow = inflate.bytesWritten.toLong
+//                      val bytesWriten = writtenNow - writtenBefore
+//                      val bytesRemaining = bytesChunk.size - offset - bytesWriten
+//                      writtenBefore = writtenNow
+
+//                      if (print) println(s"  bytes consumed: ${bytesWriten}")
+
+                      if (ended) {
+                        cb((Array.empty[Byte], 0, remainingChunk(bytesChunk), true).asRight)
+                      } else {
+                        if (bytesChunk.nonEmpty) {
+                          val buffer = bytesChunk.toUint8Array
+                          writable.write(
+                            buffer,
+                            e =>
+                              if (!js.isUndefined(e)) {
+                                if (error.isEmpty) {
+                                  error = e.asInstanceOf[js.Error].some
+                                }
+                              }
+                          )
+                          chunkSent(bytesChunk)
+                        }
+                        cb((Array.empty[Byte], 0, emptySlice, false).asRight)
+                      }
+
+                    case notNull =>
+                      val buffer = notNull.asInstanceOf[Buffer]
+                      val chunk = buffer.toChunk
+                      if (print) println(s"  read buffer: ${chunk.size} bytes")
+
+//                      val writtenNow = inflate.bytesWritten.toLong
+//                      val bytesWriten = writtenNow - writtenBefore
+//                      val bytesRemaining = bytesChunk.size - offset - bytesWriten
+//                      writtenBefore = writtenNow
+//                      if (print) println(s"  bytes consumed: ${bytesWriten}")
+
+                      val slice = chunk.toArraySlice
+                      cb((slice.values, slice.length, bytesChunk, false).asRight)
+                  }
+
+                }
+              }
+          }
+      }
+    }
+  }
 
   implicit def fs2ioCompressionForAsync[F[_]](implicit F: Async[F]): Compression[F] =
     new Compression.UnsealedCompression[F] {
@@ -52,7 +224,7 @@ private[fs2] trait compressionplatform {
             (deflateParams.header match {
               case ZLibParams.Header.GZIP => zlibMod.createDeflateRaw(options)
               case ZLibParams.Header.ZLIB => zlibMod.createDeflate(options)
-            }).asInstanceOf[Duplex]
+            }).asInstanceOf[fs2.io.Duplex]
           })
           .flatMap { case (deflate, out) =>
             out
@@ -63,89 +235,8 @@ private[fs2] trait compressionplatform {
           }
       }
 
-      override def inflate(inflateParams: InflateParams): Pipe[F, Byte, Byte] = in =>
-        inflateAndTrailer(inflateParams, 0)(in).flatMap(_._1)
-
-      private def inflateAndTrailer(
-          inflateParams: InflateParams,
-          trailerSize: Int
-      ): Stream[F, Byte] => Stream[
-        F,
-        (Stream[F, Byte], Ref[F, Chunk[Byte]], Ref[F, Long], Ref[F, Long])
-      ] = in => {
-        val options = zlibMod
-          .ZlibOptions()
-          .setChunkSize(inflateParams.bufferSizeOrMinimum.toDouble)
-
-        (
-          Stream.resource(suspendReadableAndRead() {
-            (inflateParams.header match {
-              case ZLibParams.Header.GZIP => zlibMod.createInflateRaw(options)
-              case ZLibParams.Header.ZLIB => zlibMod.createInflate(options)
-            }).asInstanceOf[Duplex]
-          }),
-          Stream.resource(SuspendedStream(in)),
-          Stream.eval(Ref.of[F, Chunk[Byte]](Chunk.empty)),
-          Stream.eval(Ref.of[F, Long](0)),
-          Stream.eval(Ref.of[F, Long](0)),
-          Stream.eval(Ref.of[F, Long](0)),
-          Stream.eval(Ref.of[F, Chunk[Byte]](Chunk.empty))
-        ).tupled.map {
-          case (
-                (inflate, out),
-                suspendedIn,
-                lastChunk,
-                bytesPiped,
-                bytesWritten,
-                crc32,
-                trailerChunk
-              ) =>
-            val trackedStream =
-              suspendedIn.stream.chunks.evalTap { chunk =>
-                bytesPiped.update(_ + chunk.size) >> lastChunk.set(chunk)
-              }.unchunks
-
-            def onBytesWritten(bytesWritten: Long): F[Unit] =
-              (bytesPiped.get, lastChunk.get).tupled.flatMap { case (bytesPiped, lastChunk) =>
-                val bytesAvailable = bytesPiped - bytesWritten
-                val headTrailerBytes = lastChunk.takeRight(bytesAvailable.toInt)
-                val bytesToPull = trailerSize - headTrailerBytes.size
-                val wholeTrailer = if (bytesToPull > 0) {
-                  suspendedIn.stream
-                    .take(bytesToPull.toLong)
-                    .chunkAll
-                    .compile
-                    .lastOrError
-                    .map(remainingBytes => headTrailerBytes ++ remainingBytes)
-                } else {
-                  headTrailerBytes.take(trailerSize).pure[F]
-                }
-                (wholeTrailer >>= trailerChunk.set).void
-              }
-
-            val crcBuilder = new CrcBuilder
-            val inflated = out
-              .concurrently(
-                trackedStream
-                  .through(writeWritable[F](inflate.asInstanceOf[Writable].pure))
-              )
-              .onFinalize {
-                F.delay(
-                  inflate.asInstanceOf[zlibMod.Zlib].bytesWritten.toLong
-                ).flatMap(onBytesWritten) >>
-                  F.async_[Unit] { cb =>
-                    inflate.asInstanceOf[zlibMod.Zlib].close(() => cb(Right(())))
-                  }
-              }
-              .through(CountPipe(bytesWritten))
-              .through(CrcPipe(crcBuilder)) ++
-              Stream
-                .eval(crc32.set(crcBuilder.getValue))
-                .flatMap(_ => Stream.empty)
-
-            (inflated, trailerChunk, bytesWritten, crc32)
-        }
-      }
+      override def inflate(inflateParams: InflateParams): Pipe[F, Byte, Byte] =
+        InflatePipe.inflateChunks(inflateParams, none, none, none, trailerSize = 0)
 
       def gzip(
           fileName: Option[String],
@@ -163,7 +254,10 @@ private[fs2] trait compressionplatform {
         )
 
       def gunzip(inflateParams: InflateParams): Stream[F, Byte] => Stream[F, GunzipResult[F]] =
-        gzip.gunzip(inflateAndTrailer(inflateParams, gzip.gzipTrailerBytes), inflateParams)
+        gzip.gunzip(
+          InflatePipe.inflateAndTrailer(inflateParams, gzip.gzipTrailerBytes),
+          inflateParams
+        )
 
     }
 }

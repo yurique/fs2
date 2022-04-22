@@ -393,6 +393,8 @@ abstract class CompressionSuite(implicit compression: Compression[IO]) extends F
     }
   }
 
+  override def scalaCheckInitialSeed = "Xf5NPB2jQW5-wZXcdI9z80NtXBKC-JhVM2tacQEBvOD="
+
   test("gzip |> gunzip ~= id (mutually prime chunk sizes, compression larger)") {
     forAllF {
       (
@@ -402,6 +404,12 @@ abstract class CompressionSuite(implicit compression: Compression[IO]) extends F
           flushMode: DeflateParams.FlushMode,
           epochSeconds: Int
       ) =>
+//        println("-" * 60)
+//        println(s"test data: ${Chunk.array(s.getBytes).size} bytes")
+//        println(s"test level: $level")
+//        println(s"test strategy: $strategy")
+//        println(s"test flushMode: $flushMode")
+//        println(s"test epochSeconds: $epochSeconds")
         val expectedFileName = Option(toEncodableFileName(s))
         val expectedComment = Option(toEncodableComment(s))
         val expectedMTime = Option(FiniteDuration(epochSeconds.toLong, TimeUnit.SECONDS))
